@@ -20,12 +20,14 @@ export interface UseTileArgs {
    * bitrate. Real VMS clients pull a dedicated low-res sub-stream for this.
    */
   focused?: boolean;
+  /** Audio is opt-in per feed; everything starts muted so autoplay works. */
+  audible?: boolean;
   /** Heartbeat sink — the worker owns the clock, we only report frames. */
   onFrame: (id: string, at: number, mediaTime: number) => void;
   onIdle: (id: string) => void;
 }
 
-export function useTile({ id, src, fault, focused = false, onFrame, onIdle }: UseTileArgs) {
+export function useTile({ id, src, fault, focused = false, audible = false, onFrame, onIdle }: UseTileArgs) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const hlsRef = useRef<Hls | null>(null);
   const intervalsRef = useRef<number[]>([]);
@@ -164,6 +166,13 @@ export function useTile({ id, src, fault, focused = false, onFrame, onIdle }: Us
       if (hls) hls.currentLevel = focused ? -1 : 0;
     }
   }, [fault, focused]);
+
+  // Autoplay requires muted, so every feed starts muted and audio is opt-in.
+  // Unmuting is driven by a click, which satisfies the gesture requirement.
+  useEffect(() => {
+    const v = videoRef.current;
+    if (v) v.muted = !audible;
+  }, [audible]);
 
   const attachRef = useCallback((el: HTMLVideoElement | null) => { videoRef.current = el; }, []);
 

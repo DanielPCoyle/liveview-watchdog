@@ -45,19 +45,25 @@ The point is that the person receiving it gets numbers rather than "camera 3 loo
 
 Both are public-broadcaster news channels published as open HLS with CORS on playlist **and** segments, which is the signal that cross-origin playback is permitted. They are third-party feeds used here for testing; this project does not own the content.
 
-Getting to two working sources meant rejecting most of the field, and the failure modes are not obvious:
+Getting to two working sources meant rejecting most of the field. The failure modes are not obvious, and **one of my own verdicts was wrong** — recorded below, because the mistake is more instructive than the table:
 
-| Candidate | Why |
+| Candidate | Verdict (browser-verified) |
 |---|---|
-| `test-streams.mux.dev`, `mux-pts-shift` | **VOD.** hls.js buffers a VOD asset end-to-end — `buffered` came back `[10, 300]`, 208s ahead — so it cannot be starved and no live-edge behaviour occurs. An earlier version of this project ran on one of these, which meant demoing a live product on video-on-demand. |
-| Unified Streaming live channels | Genuinely live and CORS-clean, but **colour-bar test patterns**, not footage. Fine for correctness, useless for showing what the thing is actually for. |
-| Apple `bipbop` | No `Access-Control-Allow-Origin` header at all. |
+| `test-streams.mux.dev` | **VOD.** hls.js buffers a VOD asset end-to-end — `buffered` came back `[10, 300]`, 208s ahead — so it cannot be starved and no live-edge behaviour occurs. An earlier version of this project ran on one, i.e. demoed a live product on video-on-demand. |
+| Apple `bipbop` | **VOD.** CORS is fine — see the correction below. |
+| Unified Streaming live channels | Genuinely live and CORS-clean, but colour-bar **test patterns**, not footage. Fine for correctness, useless for showing what the thing is for. |
 | Akamai `cph-p2p-msl`, `moctobpltc` | Masters resolve; their advertised variant playlists **404**. |
 | Bitmovin, AWS `skip_armstrong`, ZDF | 403. |
-| France24 | Playlist is CORS-enabled; **segments are not**. |
-| Al Jazeera, Amagi/ABC, Das Erste, Euronews | Connection failure / 500 / no CORS. |
+| Das Erste, Euronews | Genuinely CORS-blocked in the browser. |
+| France24 | **Intermittent** — fetched successfully once and failed 30s later. Not dependable. |
 
-Verified live 2026-08-05 — media sequence advancing, segments returning 200 with CORS. Public endpoints rot; expect to re-check.
+### A correction, and the methodology error behind it
+
+I originally recorded Apple's `bipbop` as *"no `Access-Control-Allow-Origin` header at all"*. That is **wrong**. The browser fetches it fine; it is simply VOD.
+
+The cause: I detected CORS with `curl -I`, i.e. a **HEAD** request. A server can answer HEAD without the headers it returns on GET, so several "no CORS" verdicts in the first sweep were artifacts of the measuring instrument, not properties of the servers. The browser is the only authority that matters for this question, and re-running every check as a browser `fetch()` changed two answers.
+
+Which is the same failure this whole project is about: a measurement that returns a confident, plausible value while measuring the wrong thing.
 
 **What using public feeds costs.** An earlier version generated local HLS with ffmpeg, which allowed killing a camera at the *encoder* with `SIGSTOP` — the most honest possible "the camera died". You can't do that to someone else's stream, so `freeze` is now client-side `hls.stopLoad()`: the small live buffer starves in seconds, then hls.js drops into its reload loop. That exercises the *harder* detection path rather than the easy one.
 

@@ -3,6 +3,10 @@ import { useTile } from './useTile';
 import { useLongTasks, useJankInjector } from './perf';
 import { VideoWall, computeLayout, VW, VH, type Box, type WallStreamRef } from './VideoWall';
 import type { Fault, FromWorker, Liveness, ToWorker } from './types';
+import {
+  loadRegistry, saveRegistry, probeFeed,
+  DEFAULT_REGISTRY, type Registry, type ProbeResult,
+} from './feeds';
 
 /**
  * Local live-HLS cameras from `scripts/cameras.sh` — genuinely live: sliding
@@ -12,40 +16,6 @@ import type { Fault, FromWorker, Liveness, ToWorker } from './types';
  * can't be starved and none of the live-edge behaviour this project measures
  * ever happens. Using them here would have been a demo of the wrong thing.
  */
-/**
- * Public live sources — real broadcast footage, not test patterns.
- *
- * Both are public-broadcaster news channels published as open HLS with CORS on
- * playlist and segments, which is the signal that cross-origin playback is
- * permitted. They are third-party feeds used here for testing; this project
- * does not own the content.
- *
- * Rejected along the way, because the failure modes are not obvious:
- *   - most published "HLS test streams" are VOD. hls.js buffers a VOD asset
- *     end-to-end (`buffered` came back [10, 300], 208s ahead), so it cannot be
- *     starved and no live-edge behaviour occurs at all.
- *   - Unified Streaming's live channels are genuinely live and CORS-clean, but
- *     they are colour-bar test patterns, not footage.
- *   - Apple bipbop sends no CORS header; two Akamai demo channels advertise
- *     variants that 404; Bitmovin/AWS/ZDF return 403; France24's segments are
- *     not CORS-enabled even though its playlist is.
- *
- * Verified live 2026-08-05 (media sequence advancing, segments 200 + CORS).
- * Public endpoints rot — expect to re-check.
- */
-const PUBLIC_SOURCES = [
-  { label: 'DW-EN', src: 'https://dwamdstream102.akamaized.net/hls/live/2015525/dwstream102/index.m3u8' },
-  { label: 'TAGESSCHAU', src: 'https://tagesschau.akamaized.net/hls/live/2020115/tagesschau/tagesschau_1/master.m3u8' },
-];
-
-function sourcesFor(n: number) {
-  return Array.from({ length: n }, (_, i) => {
-    const s = PUBLIC_SOURCES[i % PUBLIC_SOURCES.length];
-    const dup = Math.floor(i / PUBLIC_SOURCES.length);
-    return { label: dup ? `${s.label}·${dup + 1}` : s.label, src: s.src, faultable: true as const };
-  });
-}
-
 const DEGRADED_AFTER_MS = 400;
 const STALE_AFTER_MS = 1200;
 
@@ -98,7 +68,8 @@ function pct(b: Box) {
 function Stream(props: {
   id: string; label: string; src: string; fault: Fault;
   box: Box | undefined; isHero: boolean; resolved: boolean;
-  status: WorkerStatus | undefined; showNaive: boolean;
+  status: WorkerStatus | undefined; showNaive: boolean; audible: boolean;
+  onToggleAudio: (id: string) => void;
   onFrame: (id: string, at: number, mediaTime: number) => void;
   onIdle: (id: string) => void;
   onEl: (id: string, el: HTMLVideoElement | null) => void;
@@ -109,7 +80,7 @@ function Stream(props: {
 }) {
   const { attachRef, naive, stats } = useTile({
     id: props.id, src: props.src, fault: props.fault, focused: props.isHero,
-    onFrame: props.onFrame, onIdle: props.onIdle,
+    audible: props.audible, onFrame: props.onFrame, onIdle: props.onIdle,
   });
   const { onEl, id } = props;
   const videoRef = useCallback((el: HTMLVideoElement | null) => { attachRef(el); onEl(id, el); }, [attachRef, onEl, id]);
@@ -133,6 +104,12 @@ function Stream(props: {
         >
           {props.resolved && <div className="toast">Signal restored</div>}
           <div className="ov__bar">
+            <button className={`ov__audio ${props.audible ? 'on' : ''}`}
+              title={props.audible ? 'Mute this feed' : 'Unmute this feed'}
+              aria-label={props.audible ? `Mute ${props.label}` : `Unmute ${props.label}`}
+              onClick={(e) => { e.stopPropagation(); props.onToggleAudio(props.id); }}>
+              {props.audible ? '🔊' : '🔇'}
+            </button>
             <span className="ov__label">{props.label}</span>
             <span className={`pill pill--${shown}`}>
               {shown}
@@ -237,8 +214,140 @@ function ReportDialog(props: {
   );
 }
 
+
+/**
+ * Feed registry panel. Register a stream, assign it to a group, and — before it
+ * ever reaches the wall — probe it. The probe is the useful part: a URL cannot
+ * tell you whether it is live or VOD, or whether its SEGMENTS are CORS-enabled
+ * as well as its playlist, and both mistakes fail in confusing ways later.
+ */
+function FeedPanel(props: {
+  registry: Registry;
+  activeGroup: string;
+  onChange: (r: Registry) => void;
+  onClose: () => void;
+}) {
+  const { registry } = props;
+  const [label, setLabel] = useState('');
+  const [src, setSrc] = useState('');
+  const [groupId, setGroupId] = useState(props.activeGroup || registry.groups[0]?.id || '');
+  const [probing, setProbing] = useState(false);
+  const [probe, setProbe] = useState<ProbeResult | null>(null);
+  const [newGroup, setNewGroup] = useState('');
+
+  const runProbe = async () => {
+    if (!src.trim()) return;
+    setProbing(true); setProbe(null);
+    setProbe(await probeFeed(src.trim()));
+    setProbing(false);
+  };
+
+  const add = (force = false) => {
+    const url = src.trim();
+    if (!url || !groupId) return;
+    if (!force && (!probe || !probe.ok)) return;
+    props.onChange({
+      ...registry,
+      feeds: [...registry.feeds, {
+        id: `f-${Date.now().toString(36)}`,
+        label: label.trim() || `FEED ${registry.feeds.length + 1}`,
+        src: url, groupId,
+      }],
+    });
+    setLabel(''); setSrc(''); setProbe(null);
+  };
+
+  return (
+    <div className="modal" role="dialog" aria-modal="true" aria-label="Feed registry"
+      onClick={(e) => { if (e.target === e.currentTarget) props.onClose(); }}>
+      <div className="modal__panel panel">
+        <h2>Feed registry</h2>
+
+        <div className="field">
+          <span>Register a feed</span>
+          <div className="panel__add">
+            <input placeholder="Label (e.g. LOBBY-01)" value={label} onChange={(e) => setLabel(e.target.value)} />
+            <input placeholder="HLS URL (.m3u8)" value={src}
+              onChange={(e) => { setSrc(e.target.value); setProbe(null); }} />
+            <select value={groupId} onChange={(e) => setGroupId(e.target.value)}>
+              {registry.groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+            </select>
+            <button type="button" onClick={runProbe} disabled={!src.trim() || probing}>
+              {probing ? 'checking…' : 'check'}
+            </button>
+            <button type="button" className="on" onClick={() => add()} disabled={!probe?.ok}>add</button>
+          </div>
+          {probe && (
+            <p className={`probe probe--${probe.ok ? 'ok' : 'bad'}`}>
+              <strong>{probe.verdict}</strong> — {probe.detail}
+              {!probe.ok && (
+                <button type="button" className="probe__force" onClick={() => add(true)}>add anyway</button>
+              )}
+            </p>
+          )}
+        </div>
+
+        <div className="field">
+          <span>Groups</span>
+          <ul className="panel__groups">
+            {registry.groups.map((g) => (
+              <li key={g.id}>
+                <span>{g.name}</span>
+                <span className="panel__count">{registry.feeds.filter((f) => f.groupId === g.id).length}</span>
+                <button type="button" disabled={registry.groups.length <= 1}
+                  title={registry.groups.length <= 1 ? 'Keep at least one group' : 'Remove group and its feeds'}
+                  onClick={() => props.onChange({
+                    groups: registry.groups.filter((x) => x.id !== g.id),
+                    feeds: registry.feeds.filter((f) => f.groupId !== g.id),
+                  })}>remove</button>
+              </li>
+            ))}
+          </ul>
+          <div className="panel__add">
+            <input placeholder="New group name" value={newGroup} onChange={(e) => setNewGroup(e.target.value)} />
+            <button type="button" disabled={!newGroup.trim()} onClick={() => {
+              props.onChange({ ...registry, groups: [...registry.groups, { id: `g-${Date.now().toString(36)}`, name: newGroup.trim() }] });
+              setNewGroup('');
+            }}>add group</button>
+          </div>
+        </div>
+
+        <div className="field">
+          <span>Registered feeds ({registry.feeds.length})</span>
+          <ul className="panel__feeds">
+            {registry.feeds.length === 0 && <li className="panel__empty">Nothing registered yet.</li>}
+            {registry.feeds.map((f) => (
+              <li key={f.id}>
+                <span className="panel__label">{f.label}</span>
+                <select value={f.groupId} onChange={(e) => props.onChange({
+                  ...registry,
+                  feeds: registry.feeds.map((x) => x.id === f.id ? { ...x, groupId: e.target.value } : x),
+                })}>
+                  {registry.groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+                </select>
+                <span className="panel__src" title={f.src}>{f.src}</span>
+                <button type="button" onClick={() => props.onChange({
+                  ...registry, feeds: registry.feeds.filter((x) => x.id !== f.id),
+                })}>remove</button>
+              </li>
+            ))}
+          </ul>
+        </div>
+
+        <div className="modal__actions">
+          <button type="button" onClick={() => props.onChange(DEFAULT_REGISTRY)}>reset to defaults</button>
+          <button type="button" className="on" onClick={props.onClose}>done</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
-  const [tileCount, setTileCount] = useState(4);
+  const [registry, setRegistry] = useState<Registry>(() => loadRegistry());
+  const [activeGroup, setActiveGroup] = useState<string>(() => loadRegistry().groups[0]?.id ?? '');
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [audible, setAudible] = useState<Record<string, boolean>>({});
   const [faults, setFaults] = useState<Record<string, Fault>>({});
   const [statuses, setStatuses] = useState<Record<string, WorkerStatus>>({});
   const [jank, setJank] = useState(false);
@@ -265,10 +374,22 @@ export default function App() {
     return () => window.clearInterval(t);
   }, []);
 
+  // Only the ACTIVE group is mounted. Decode is the ceiling — one decoder per
+  // feed — so tabs are what make a large registry affordable rather than a way
+  // to tidy the UI.
   const tiles = useMemo(
-    () => sourcesFor(tileCount).map((s, i) => ({ id: `t${i}`, ...s })),
-    [tileCount],
+    () => registry.feeds.filter((f) => f.groupId === activeGroup)
+      .map((f) => ({ id: f.id, label: f.label, src: f.src, faultable: true })),
+    [registry.feeds, activeGroup],
   );
+
+  useEffect(() => { saveRegistry(registry); }, [registry]);
+
+  useEffect(() => {
+    if (!registry.groups.some((g) => g.id === activeGroup)) {
+      setActiveGroup(registry.groups[0]?.id ?? '');
+    }
+  }, [registry.groups, activeGroup]);
 
   useEffect(() => {
     const w = new Worker(new URL('./watchdog.worker.ts', import.meta.url), { type: 'module' });
@@ -384,6 +505,9 @@ export default function App() {
     setElVersion((v) => v + 1);
   }, []);
   const onFps = useCallback((f: number) => setWallFps(f), []);
+  const onToggleAudio = useCallback((id: string) => {
+    setAudible((prev) => ({ ...prev, [id]: !prev[id] }));
+  }, []);
   const onReport = useCallback((id: string, cam: string, evidence: Escalation['evidence']) => {
     setReporting({ id, cam, evidence });
   }, []);
@@ -437,11 +561,19 @@ export default function App() {
       </section>
 
       <section className="controls">
-        <label>
-          feeds
-          <input type="range" min={1} max={64} value={tileCount} onChange={(e) => setTileCount(Number(e.target.value))} />
-          <output>{tileCount}</output>
-        </label>
+        <div className="tabs" role="tablist" aria-label="Feed groups">
+          {registry.groups.map((g) => {
+            const count = registry.feeds.filter((f) => f.groupId === g.id).length;
+            return (
+              <button key={g.id} role="tab" aria-selected={g.id === activeGroup}
+                className={g.id === activeGroup ? 'tab on' : 'tab'}
+                onClick={() => setActiveGroup(g.id)}>
+                {g.name}<span className="tab__count">{count}</span>
+              </button>
+            );
+          })}
+        </div>
+        <button onClick={() => setPanelOpen(true)}>manage feeds</button>
         <button className={autoPromote ? 'on' : ''} onClick={() => setAutoPromote((v) => !v)}
           title="Promote any feed that loses signal into the main area automatically">
           auto-promote on signal loss: {autoPromote ? 'on' : 'off'}
@@ -467,7 +599,8 @@ export default function App() {
                 status={statuses[t.id]} showNaive={showNaive}
                 onFrame={onFrame} onIdle={onIdle} onEl={onEl}
                 onFaultChange={onFaultChange} onToggleFocus={onToggleFocus}
-                onReport={onReport} faultable={t.faultable} />
+                onReport={onReport} faultable={t.faultable}
+                audible={!!audible[t.id]} onToggleAudio={onToggleAudio} />
             ))}
           </div>
         </div>
@@ -514,6 +647,11 @@ export default function App() {
           </p>
         </aside>
       </div>
+
+      {panelOpen && (
+        <FeedPanel registry={registry} activeGroup={activeGroup}
+          onChange={setRegistry} onClose={() => setPanelOpen(false)} />
+      )}
 
       {reporting && (
         <ReportDialog pending={reporting} onSubmit={submitEscalation} onCancel={() => setReporting(null)} />
