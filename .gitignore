@@ -3,3 +3,4 @@ dist
 .DS_Store
 public/live/cam*/
 public/live/.pids
+*.tsbuildinfo
