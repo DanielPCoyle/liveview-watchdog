@@ -4,6 +4,9 @@ import type { Fault, NaiveState, TileStats } from './types';
 
 const MAX_INTERVALS = 300;
 
+/** Floor for forward buffer, in seconds — see the LEVEL_LOADED handler. */
+const MIN_BUFFER_S = 3;
+
 function percentile(sorted: number[], q: number): number | null {
   if (!sorted.length) return null;
   return +sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * q))].toFixed(1);
@@ -60,11 +63,29 @@ export function useTile({ id, src, fault, focused = false, audible = false, onFr
         enableWorker: true,
         lowLatencyMode: false,
         capLevelToPlayerSize: true,
-        maxBufferLength: 3,
+        maxBufferLength: MIN_BUFFER_S,
         backBufferLength: 4,
       });
       hlsRef.current = hls;
       hls.on(Hls.Events.MANIFEST_PARSED, () => { void v.play().catch(() => {}); refreshNaive(); });
+
+      /**
+       * Buffer headroom has to be relative to SEGMENT SIZE, not absolute.
+       *
+       * 3 seconds is three segments of headroom on a 1-second feed and less
+       * than ONE segment on a public traffic camera publishing 10-second
+       * segments — which parks the player permanently at the live edge, so any
+       * jitter in when the encoder publishes drains the buffer and playback
+       * stalls. That stall is real (frames genuinely stop) and the watchdog is
+       * right to report it, but the cause is this config, not the camera, and
+       * an incident log full of self-inflicted outages is worse than useless.
+       *
+       * Keep the aggressive target as a FLOOR and ask for two segments.
+       */
+      hls.on(Hls.Events.LEVEL_LOADED, (_e, d) => {
+        const want = Math.max(MIN_BUFFER_S, (d.details.targetduration || 0) * 2);
+        if (hls.config.maxBufferLength !== want) hls.config.maxBufferLength = want;
+      });
       hls.on(Hls.Events.ERROR, (_e, d) => { if (d.fatal) refreshNaive(); });
       hls.loadSource(src);
       hls.attachMedia(v);

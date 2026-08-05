@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import CreatableSelect from 'react-select/creatable';
 import { useTile } from './useTile';
 import { useLongTasks, useJankInjector } from './perf';
-import { VideoWall, computeLayout, VW, VH, type Box, type WallStreamRef } from './VideoWall';
+import { VideoWall, computeLayout, emphasize, VW, VH, type Box, type WallStreamRef } from './VideoWall';
 import type { Fault, FromWorker, Liveness, ToWorker } from './types';
 import {
   loadRegistry, saveRegistry, probeFeed,
@@ -92,6 +92,12 @@ function Stream(props: {
   onToggleFocus: (id: string) => void;
   onReport: (id: string, cam: string, ev: Escalation['evidence']) => void;
   onRemove: (id: string) => void;
+  /**
+   * Bumped when the roster asks THIS feed to be escalated. The roster cannot
+   * assemble the evidence itself — decode counts live with the decoder, which
+   * is here — so it names a feed and the feed answers with its own numbers.
+   */
+  reportNonce: number;
   faultable: boolean;
 }) {
   const { attachRef, naive, stats } = useTile({
@@ -104,6 +110,23 @@ function Stream(props: {
   const st = props.status;
   const liveness = st?.liveness ?? 'idle';
   const shown = props.showNaive ? naive : liveness;
+
+  // Snapshot the evidence at the moment of reporting, from the component that
+  // actually owns the decoder.
+  const snapshot = (): Escalation['evidence'] => ({
+    liveness, staleMs: st?.staleMs ?? 0, drift: st?.drift ?? null,
+    decoded: stats.totalFrames, dropped: stats.droppedFrames,
+    droppedPct: stats.droppedPct, source: props.src,
+  });
+
+  const { reportNonce } = props;
+  useEffect(() => {
+    if (!reportNonce) return;
+    props.onReport(props.id, props.label, snapshot());
+    // Only the nonce fires this. Depending on the stats would re-send the
+    // escalation every 400ms tick; the point is a reading taken *then*.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reportNonce]);
 
   return (
     <>
@@ -158,13 +181,7 @@ function Stream(props: {
               <button className="ov__report"
                 onClick={(e) => {
                   e.stopPropagation();
-                  // Snapshot the evidence at the moment of reporting, from the
-                  // component that actually owns the decoder.
-                  props.onReport(props.id, props.label, {
-                    liveness, staleMs: st?.staleMs ?? 0, drift: st?.drift ?? null,
-                    decoded: stats.totalFrames, dropped: stats.droppedFrames,
-                    droppedPct: stats.droppedPct, source: props.src,
-                  });
+                  props.onReport(props.id, props.label, snapshot());
                 }}>report incident</button>
             </div>
           )}
@@ -330,15 +347,22 @@ const selectStyles = {
  * SEGMENTS are CORS-enabled as well as the playlist — and each of those fails
  * confusingly later rather than here.
  */
-function AddFeedDialog(props: {
+function FeedDialog(props: {
   groupName: string;
-  onAdd: (label: string, src: string) => void;
+  /** Present when editing an existing feed rather than registering a new one. */
+  initial?: { label: string; src: string };
+  onSave: (label: string, src: string) => void;
   onCancel: () => void;
 }) {
-  const [label, setLabel] = useState('');
-  const [src, setSrc] = useState('');
+  const [label, setLabel] = useState(props.initial?.label ?? '');
+  const [src, setSrc] = useState(props.initial?.src ?? '');
   const [probing, setProbing] = useState(false);
   const [probe, setProbe] = useState<ProbeResult | null>(null);
+
+  // An unchanged source was already vetted when it was registered, so a rename
+  // does not have to re-probe. Point it somewhere new and it does.
+  const srcUnchanged = props.initial != null && src.trim() === props.initial.src;
+  const canSave = (probe?.ok || srcUnchanged) && !!src.trim();
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') props.onCancel(); };
@@ -354,10 +378,11 @@ function AddFeedDialog(props: {
   };
 
   return (
-    <div className="modal" role="dialog" aria-modal="true" aria-label="Add feed"
+    <div className="modal" role="dialog" aria-modal="true"
+      aria-label={props.initial ? 'Edit feed' : 'Add feed'}
       onClick={(e) => { if (e.target === e.currentTarget) props.onCancel(); }}>
-      <form className="modal__panel" onSubmit={(e) => { e.preventDefault(); if (probe?.ok) props.onAdd(label, src); }}>
-        <h2>Add feed to “{props.groupName}”</h2>
+      <form className="modal__panel" onSubmit={(e) => { e.preventDefault(); if (canSave) props.onSave(label, src); }}>
+        <h2>{props.initial ? `Edit “${props.initial.label}”` : `Add feed to “${props.groupName}”`}</h2>
 
         <label className="field">
           <span>Label</span>
@@ -403,12 +428,198 @@ function AddFeedDialog(props: {
             {probing ? 'checking…' : 'check'}
           </button>
           {probe && !probe.ok && (
-            <button type="button" onClick={() => props.onAdd(label, src)}>add anyway</button>
+            <button type="button" onClick={() => props.onSave(label, src)}>
+              {props.initial ? 'save anyway' : 'add anyway'}
+            </button>
           )}
-          <button type="submit" className="on" disabled={!probe?.ok}>add</button>
+          <button type="submit" className="on" disabled={!canSave}>
+            {props.initial ? 'save' : 'add'}
+          </button>
         </div>
       </form>
     </div>
+  );
+}
+
+interface Tile { id: string; label: string; src: string; faultable: boolean }
+
+const FILTERS = ['all', 'live', 'degraded', 'stale'] as const;
+type FilterKey = (typeof FILTERS)[number];
+
+/**
+ * Roster for the active group — one panel per group, showing only what that
+ * group has mounted.
+ *
+ * The wall answers "is anything wrong". This answers "where is the one I'm
+ * thinking of", which is a different question and the one that gets slow first.
+ * At six feeds you scan the grid. At forty near-identical tiles you don't — and
+ * the moment you most need LOT-07 is the moment you have the least attention
+ * spare to hunt for it.
+ *
+ * Hovering PREVIEWS rather than navigates: the tile swells on the wall so the
+ * row and the picture are tied together, without committing to a layout change
+ * nobody asked for. Clicking is the commitment.
+ */
+function FeedRoster(props: {
+  groupName: string;
+  tiles: Tile[];
+  statuses: Record<string, WorkerStatus>;
+  heroIds: string[];
+  ignored: Record<string, boolean>;
+  audible: Record<string, boolean>;
+  onHover: (id: string | null) => void;
+  onPick: (id: string) => void;
+  onReport: (id: string) => void;
+  onToggleIgnore: (id: string) => void;
+  onToggleAudio: (id: string) => void;
+  onEdit: (id: string) => void;
+  onRemove: (id: string) => void;
+  onReorder: (dragId: string, dropId: string) => void;
+}) {
+  const [q, setQ] = useState('');
+  const [filter, setFilter] = useState<FilterKey>('all');
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [overId, setOverId] = useState<string | null>(null);
+  const { tiles, statuses } = props;
+
+  const livenessOf = useCallback(
+    (id: string) => statuses[id]?.liveness ?? 'idle',
+    [statuses],
+  );
+
+  const counts = useMemo(() => {
+    const c: Record<FilterKey, number> = { all: tiles.length, live: 0, degraded: 0, stale: 0 };
+    for (const t of tiles) {
+      const l = statuses[t.id]?.liveness;
+      if (l && l !== 'idle') c[l] += 1;
+    }
+    return c;
+  }, [tiles, statuses]);
+
+  // Match the URL as well as the label: feeds get named after where they point
+  // often enough that "akamai" or "tagesschau" is the thing actually in mind.
+  const shown = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    return tiles.filter((t) => {
+      if (filter !== 'all' && livenessOf(t.id) !== filter) return false;
+      if (!needle) return true;
+      return t.label.toLowerCase().includes(needle) || t.src.toLowerCase().includes(needle);
+    });
+  }, [tiles, q, filter, livenessOf]);
+
+  /**
+   * Reordering is disabled while the list is narrowed, because "drop it below
+   * the third row" has no defined meaning when rows are hidden — the operator
+   * would be arranging a list they cannot see.
+   */
+  const narrowed = shown.length !== tiles.length;
+
+  /** Same move as a drag, for people not using a mouse. */
+  const nudge = (id: string, delta: number) => {
+    const i = tiles.findIndex((t) => t.id === id);
+    const target = tiles[i + delta];
+    if (target) props.onReorder(id, target.id);
+  };
+
+  return (
+    <aside className="roster" aria-label={`Feeds in ${props.groupName}`}>
+      <h2>
+        {props.groupName}
+        <span className="roster__tally">
+          {shown.length === tiles.length ? `${tiles.length}` : `${shown.length}/${tiles.length}`}
+        </span>
+      </h2>
+
+      <input className="roster__search" type="search" value={q} placeholder="search feeds…"
+        aria-label="Search feeds by name or source" onChange={(e) => setQ(e.target.value)} />
+
+      <div className="roster__filters" role="group" aria-label="Filter by liveness">
+        {FILTERS.map((f) => (
+          <button key={f} className={filter === f ? 'on' : ''}
+            aria-pressed={filter === f}
+            onClick={() => setFilter(f)}>
+            {f}<span className="roster__n">{counts[f]}</span>
+          </button>
+        ))}
+      </div>
+
+      {shown.length === 0 ? (
+        <p className="log__empty">
+          {tiles.length === 0 ? 'No feeds in this group yet — use the empty slot on the wall.' : 'Nothing matches.'}
+        </p>
+      ) : (
+        <ul className="roster__list">
+          {shown.map((t) => {
+            const live = livenessOf(t.id);
+            const isHero = props.heroIds.includes(t.id);
+            const ig = !!props.ignored[t.id];
+            return (
+              <li key={t.id}
+                className={[
+                  'roster__item', isHero ? 'on' : '', ig ? 'muted' : '',
+                  dragId === t.id ? 'dragging' : '', overId === t.id && dragId !== t.id ? 'over' : '',
+                ].filter(Boolean).join(' ')}
+                draggable={!narrowed}
+                onDragStart={(e) => {
+                  setDragId(t.id);
+                  e.dataTransfer.effectAllowed = 'move';
+                  // Firefox starts no drag at all unless the payload is set.
+                  e.dataTransfer.setData('text/plain', t.id);
+                }}
+                onDragOver={(e) => { if (dragId) { e.preventDefault(); setOverId(t.id); } }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  if (dragId && dragId !== t.id) props.onReorder(dragId, t.id);
+                  setDragId(null); setOverId(null);
+                }}
+                onDragEnd={() => { setDragId(null); setOverId(null); }}
+                onMouseEnter={() => props.onHover(t.id)}
+                onMouseLeave={() => props.onHover(null)}>
+                <button className="roster__pick" aria-pressed={isHero}
+                  title={isHero ? `Return ${t.label} to the wall` : `Bring ${t.label} into the main area`}
+                  onFocus={() => props.onHover(t.id)}
+                  onBlur={() => props.onHover(null)}
+                  onClick={() => props.onPick(t.id)}
+                  onKeyDown={(e) => {
+                    if (!e.altKey || narrowed) return;
+                    if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+                    e.preventDefault();
+                    nudge(t.id, e.key === 'ArrowUp' ? -1 : 1);
+                  }}>
+                  <span className="roster__grip" aria-hidden
+                    title={narrowed ? 'Clear the search to reorder' : 'Drag to reorder — or alt + ↑/↓'}>⠿</span>
+                  <span className="roster__name">{t.label}</span>
+                  <span className={`pill pill--${live}`}>
+                    {live}{live !== 'idle' && live !== 'live' ? ` ${((statuses[t.id]?.staleMs ?? 0) / 1000).toFixed(1)}s` : ''}
+                  </span>
+                </button>
+
+                <div className="roster__actions">
+                  <button onClick={() => props.onReport(t.id)}
+                    title={`Escalate ${t.label} with its measurements attached`}>report</button>
+                  <button className={ig ? 'on' : ''} aria-pressed={ig}
+                    onClick={() => props.onToggleIgnore(t.id)}
+                    title={ig
+                      ? `Stop ignoring ${t.label} — it can be auto-promoted again`
+                      : `Acknowledge ${t.label}: keep monitoring and logging it, but stop promoting it`}>
+                    {ig ? 'ignored' : 'ignore'}
+                  </button>
+                  <button onClick={() => props.onEdit(t.id)} title={`Rename or re-point ${t.label}`}>edit</button>
+                  <button className={`roster__audio ${props.audible[t.id] ? 'on' : ''}`}
+                    aria-label={props.audible[t.id] ? `Mute ${t.label}` : `Unmute ${t.label}`}
+                    onClick={() => props.onToggleAudio(t.id)}>
+                    {props.audible[t.id] ? '🔊' : '🔇'}
+                  </button>
+                  <button className="roster__remove" aria-label={`Remove ${t.label}`}
+                    title={`Remove ${t.label} from this group`}
+                    onClick={() => props.onRemove(t.id)}>×</button>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </aside>
   );
 }
 
@@ -432,6 +643,17 @@ export default function App() {
   const [autoPromote, setAutoPromote] = useState(true);
   const [manualIds, setManualIds] = useState<string[]>([]);
   const [resolving, setResolving] = useState<Record<string, number>>({});
+
+  const [hoverId, setHoverId] = useState<string | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
+  /**
+   * Acknowledged feeds. Deliberately NOT persisted: an acknowledgement is about
+   * a shift, not about a camera, and one that silently survives a reload is how
+   * a feed stays suppressed long after the person who suppressed it went home.
+   */
+  const [ignored, setIgnored] = useState<Record<string, boolean>>({});
+  /** Roster escalation requests — see Stream's reportNonce. */
+  const [reportReq, setReportReq] = useState<{ id: string; n: number } | null>(null);
 
   const workerRef = useRef<Worker | null>(null);
   const elsRef = useRef<Record<string, HTMLVideoElement | null>>({});
@@ -562,19 +784,28 @@ export default function App() {
   const heroIds = useMemo(() => {
     const set = new Set(manualIds);
     if (autoPromote) {
-      staleIds.forEach((id) => set.add(id));
-      Object.keys(resolving).forEach((id) => set.add(id));
+      // Ignoring a feed suppresses PROMOTION, not measurement: it keeps being
+      // watched, keeps counting as signal lost, and keeps writing to the
+      // incident log. An acknowledgement that also stopped the monitoring would
+      // be a mute button dressed up as an operator action. A manual pick still
+      // overrides it — deliberately choosing a feed you ignored is not a
+      // mistake to protect anyone from.
+      staleIds.forEach((id) => { if (!ignored[id]) set.add(id); });
+      Object.keys(resolving).forEach((id) => { if (!ignored[id]) set.add(id); });
     }
     return tiles.filter((t) => set.has(t.id)).map((t) => t.id);   // stable order
-  }, [manualIds, autoPromote, staleIds, resolving, tiles]);
+  }, [manualIds, autoPromote, staleIds, resolving, tiles, ignored]);
 
   const heroKey = heroIds.join(',');
   // The empty "add feed" slot occupies a real grid position, so it is part of
   // the layout rather than floated on top of it.
   const ADD_SLOT = '__add__';
   const layout = useMemo(
-    () => computeLayout([...tiles.map((t) => t.id), ADD_SLOT], heroIds),
-    [tiles, heroKey], // eslint-disable-line react-hooks/exhaustive-deps
+    () => {
+      const base = computeLayout([...tiles.map((t) => t.id), ADD_SLOT], heroIds);
+      return hoverId ? emphasize(base, hoverId) : base;
+    },
+    [tiles, heroKey, hoverId], // eslint-disable-line react-hooks/exhaustive-deps
   );
 
   const onToggleFocus = useCallback((id: string) => {
@@ -622,6 +853,44 @@ export default function App() {
     }));
     setAdding(false);
   }, [activeGroup]);
+  const editFeed = useCallback((label: string, src: string) => {
+    if (!editing) return;
+    setRegistry((r) => ({
+      ...r,
+      feeds: r.feeds.map((f) => (f.id === editing
+        ? { ...f, label: label.trim() || f.label, src: src.trim() || f.src }
+        : f)),
+    }));
+    setEditing(null);
+  }, [editing]);
+  /**
+   * Move one feed to another's position within the active group.
+   *
+   * The roster order IS the wall order — the same array feeds computeLayout —
+   * so dragging a row rearranges the grid rather than just the list. Anything
+   * else would be two orderings to keep in your head.
+   *
+   * Other groups' feeds keep the exact slots they held in the registry array:
+   * the reordered group is written back into the positions it already occupied.
+   */
+  const reorderFeed = useCallback((dragId: string, dropId: string) => {
+    setRegistry((r) => {
+      const inGroup = r.feeds.filter((f) => f.groupId === activeGroup);
+      const from = inGroup.findIndex((f) => f.id === dragId);
+      const to = inGroup.findIndex((f) => f.id === dropId);
+      if (from < 0 || to < 0 || from === to) return r;
+      const next = [...inGroup];
+      next.splice(to, 0, next.splice(from, 1)[0]);
+      let i = 0;
+      return { ...r, feeds: r.feeds.map((f) => (f.groupId === activeGroup ? next[i++] : f)) };
+    });
+  }, [activeGroup]);
+  const toggleIgnore = useCallback((id: string) => {
+    setIgnored((prev) => ({ ...prev, [id]: !prev[id] }));
+  }, []);
+  const requestReport = useCallback((id: string) => {
+    setReportReq((prev) => ({ id, n: (prev?.n ?? 0) + 1 }));
+  }, []);
   const onToggleAudio = useCallback((id: string) => {
     setAudible((prev) => ({ ...prev, [id]: !prev[id] }));
   }, []);
@@ -655,6 +924,7 @@ export default function App() {
   }, [tiles, statuses]);
 
   const liveCount = tiles.filter((t) => statuses[t.id]?.liveness === 'live').length;
+  const ignoredCount = tiles.filter((t) => ignored[t.id]).length;
 
   return (
     <div className="app">
@@ -672,6 +942,9 @@ export default function App() {
         <div><span>live</span><strong className="ok">{liveCount}</strong></div>
         <div><span>signal lost</span><strong className={staleIds.length ? 'bad' : ''}>{staleIds.length}</strong></div>
         <div><span>promoted</span><strong>{heroIds.length}</strong></div>
+        {/* Suppression has to be visible. A feed quietly excluded from
+            promotion is exactly the state an operator must not inherit blind. */}
+        {ignoredCount > 0 && <div><span>ignored</span><strong className="warn">{ignoredCount}</strong></div>}
         <div><span>wall fps</span><strong>{wallFps.toFixed(0)}</strong></div>
         <div><span>long tasks</span><strong className={perf.longTasks ? 'warn' : ''}>{perf.longTasks}</strong></div>
         <div><span>blocking</span><strong>{(perf.blockedMs / 1000).toFixed(1)}s</strong></div>
@@ -705,9 +978,18 @@ export default function App() {
       </section>
 
       <div className="stage">
+        <FeedRoster
+          groupName={registry.groups.find((g) => g.id === activeGroup)?.name ?? 'Feeds'}
+          tiles={tiles} statuses={statuses} heroIds={heroIds}
+          ignored={ignored} audible={audible}
+          onHover={setHoverId} onPick={onToggleFocus} onReport={requestReport}
+          onToggleIgnore={toggleIgnore} onToggleAudio={onToggleAudio}
+          onEdit={setEditing} onRemove={removeFeed} onReorder={reorderFeed} />
+
         <div className="wall-host">
           <VideoWall streams={wallStreams} statusById={statusById}
-            heroIds={heroIds} layout={layout} onToggleFocus={onToggleFocus} onFps={onFps} />
+            heroIds={heroIds} hoverId={hoverId} layout={layout}
+            onToggleFocus={onToggleFocus} onFps={onFps} />
           <div className="overlays">
             {tiles.map((t) => (
               <Stream key={t.id} id={t.id} label={t.label} src={t.src}
@@ -717,6 +999,7 @@ export default function App() {
                 onFrame={onFrame} onIdle={onIdle} onEl={onEl}
                 onFaultChange={onFaultChange} onToggleFocus={onToggleFocus}
                 onReport={onReport} faultable={t.faultable}
+                reportNonce={reportReq?.id === t.id ? reportReq.n : 0}
                 audible={!!audible[t.id]} onToggleAudio={onToggleAudio}
                 onRemove={removeFeed} />
             ))}
@@ -782,8 +1065,17 @@ export default function App() {
       )}
 
       {adding && (
-        <AddFeedDialog groupName={registry.groups.find((g) => g.id === activeGroup)?.name ?? ''}
-          onAdd={addFeed} onCancel={() => setAdding(false)} />
+        <FeedDialog groupName={registry.groups.find((g) => g.id === activeGroup)?.name ?? ''}
+          onSave={addFeed} onCancel={() => setAdding(false)} />
+      )}
+
+      {editing && registry.feeds.some((f) => f.id === editing) && (
+        <FeedDialog groupName={registry.groups.find((g) => g.id === activeGroup)?.name ?? ''}
+          initial={(() => {
+            const f = registry.feeds.find((x) => x.id === editing)!;
+            return { label: f.label, src: f.src };
+          })()}
+          onSave={editFeed} onCancel={() => setEditing(null)} />
       )}
 
       {reporting && (

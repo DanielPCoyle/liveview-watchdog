@@ -106,10 +106,40 @@ export function computeLayout(ids: string[], heroIds: string[]): Map<string, Box
   return out;
 }
 
+/** How much a hovered tile swells. Enough to find by eye, not enough to be a
+ *  layout change — pointing at a row should preview, not navigate. */
+export const EMPHASIS = 1.16;
+
+/**
+ * Swell one tile in place.
+ *
+ * Hover feedback goes through the LAYOUT rather than a CSS class on the overlay
+ * because the picture is WebGL: the chrome is a DOM box tracking a quad, and
+ * scaling only the DOM half would slide the label off the video it belongs to.
+ * Retarget the box and both halves follow — the render loop's lerp and the
+ * overlay's transition already animate everything else.
+ */
+export function emphasize(layout: Map<string, Box>, id: string, scale = EMPHASIS): Map<string, Box> {
+  const box = layout.get(id);
+  if (!box) return layout;
+  const w = box.w * scale;
+  const h = box.h * scale;
+  // Nudge back inside the viewport. Carousel tiles sit at the very edge, and a
+  // tile that grows half off-screen reads as a glitch rather than as a cue.
+  const out = new Map(layout);
+  out.set(id, {
+    x: Math.min(Math.max(box.x, w / 2), VW - w / 2),
+    y: Math.min(Math.max(box.y, h / 2), VH - h / 2),
+    w, h,
+  });
+  return out;
+}
+
 export function VideoWall({
   streams,
   statusById,
   heroIds,
+  hoverId,
   layout,
   onToggleFocus,
   onFps,
@@ -117,6 +147,8 @@ export function VideoWall({
   streams: WallStreamRef[];
   statusById: Record<string, Liveness>;
   heroIds: string[];
+  /** Tile the roster is pointing at — draws above its neighbours while swollen. */
+  hoverId: string | null;
   /**
    * Layout is computed by the caller and passed in, not derived here. The wall
    * is no longer the only thing on the grid — there is an empty "add feed"
@@ -139,9 +171,10 @@ export function VideoWall({
     }>;
     layout: Map<string, Box>;
     heroIds: string[];
+    hoverId: string | null;
     uploadIntervalMs: number;
     raf?: number;
-  }>({ tiles: new Map(), layout: new Map(), heroIds: [], uploadIntervalMs: 0 });
+  }>({ tiles: new Map(), layout: new Map(), heroIds: [], hoverId: null, uploadIntervalMs: 0 });
 
   const layoutKey = useMemo(
     () => streams.map((s) => `${s.id}:${s.el ? 1 : 0}`).join(','),
@@ -186,7 +219,9 @@ export function VideoWall({
         t.current.y += (t.target.y - t.current.y) * k;
         t.current.w += (t.target.w - t.current.w) * k;
         t.current.h += (t.target.h - t.current.h) * k;
-        t.group.position.set(t.current.x, t.current.y, s.heroIds.includes(id) ? 1 : 0);
+        // A swollen carousel tile overlaps its neighbours, so it has to be in
+        // front of them or the emphasis reads as a rendering fault.
+        t.group.position.set(t.current.x, t.current.y, id === s.hoverId ? 2 : s.heroIds.includes(id) ? 1 : 0);
         t.screen.scale.set(t.current.w, t.current.h, 1);
         t.frame.scale.set(t.current.w + 0.5, t.current.h + 0.5, 1);
 
@@ -241,6 +276,10 @@ export function VideoWall({
     const scene = s.scene;
     if (!scene) return;
 
+    // Reordering the roster rebuilds every mesh. Carry each tile's CURRENT box
+    // across the rebuild so it eases to its new slot instead of teleporting —
+    // a snap here would look like a bug next to the promote animation.
+    const wasAt = new Map([...s.tiles].map(([id, t]) => [id, { ...t.current }]));
     s.tiles.forEach((t) => { scene.remove(t.group); t.tex?.dispose(); });
     s.tiles.clear();
 
@@ -280,9 +319,11 @@ export function VideoWall({
       group.position.set(box.x, box.y, 0);
       scene.add(group);
 
+      const current = wasAt.get(item.id) ?? { ...box };
+      group.position.set(current.x, current.y, 0);
       s.tiles.set(item.id, {
         group, frame, screen, tex, el: item.el, lastUpload: 0,
-        target: { ...box }, current: { ...box },
+        target: { ...box }, current,
       });
     });
     // Status must not rebuild the scene — see README.
@@ -293,12 +334,13 @@ export function VideoWall({
   useEffect(() => {
     const s = st.current;
     s.heroIds = heroIds;
+    s.hoverId = hoverId;
     s.layout = layout;
     for (const [id, t] of s.tiles) {
       const box = layout.get(id);
       if (box) t.target = { ...box };
     }
-  }, [heroKey, layoutKey, layoutKeyIds, layout, heroIds]);
+  }, [heroKey, layoutKey, layoutKeyIds, layout, heroIds, hoverId]);
 
   // ── status: recolour only ───────────────────────────────────────────────
   useEffect(() => {

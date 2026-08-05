@@ -24,19 +24,48 @@ export interface Registry {
   feeds: Feed[];
 }
 
-const STORAGE_KEY = 'liveview-watchdog:registry:v1';
+/** Bumped when the seeded defaults change — a persisted registry would
+ *  otherwise pin the first run's feeds forever. */
+const STORAGE_KEY = 'liveview-watchdog:registry:v3';
+
+/** Caltrans publishes its highway CCTV as open HLS, CORS-clean. */
+const CT = (path: string) => `https://wzmedia.dot.ca.gov/${path}.stream/playlist.m3u8`;
 
 /**
- * Seeded with the two feeds verified working on 2026-08-05 — real broadcast
- * footage, live, with CORS on playlist AND segments. See README for the ones
- * that failed and why.
+ * Seeded with real public highway CCTV — Caltrans district cameras, verified
+ * end-to-end on 2026-08-05: live (sliding window, no ENDLIST), CORS on the
+ * playlist AND the segments, and delivering 5–9x faster than real time with all
+ * four running at once, which is the part that actually decides whether a wall
+ * is possible.
+ *
+ * Fixed cameras pointed at roads are the right demo material for this specific
+ * tool, and not because they look the part. They are the hardest case for a
+ * human watching a wall: the scene barely changes, so a frozen tile and a
+ * working one are visually IDENTICAL until a car should have moved and didn't.
+ * That is the failure this project exists to catch. Broadcast news, where a
+ * freeze is obvious in about a second, quietly makes the problem look easier
+ * than it is — so it is kept as a second group for contrast, and because it is
+ * multi-variant, which the focused-quality policy needs to have anything to
+ * switch between.
+ *
+ * Labels come from the stream path Caltrans publishes, not from a third-party
+ * camera list — a tool about attaching verified evidence should not open by
+ * guessing at which intersection you are looking at.
  */
 export const DEFAULT_REGISTRY: Registry = {
   groups: [
+    { id: 'g-street', name: 'Highway' },
     { id: 'g-news', name: 'News' },
     { id: 'g-scratch', name: 'Scratch' },
   ],
   feeds: [
+    { id: 'f-ct55', label: 'I5-SR55', groupId: 'g-street', src: CT('D12/NB5SR55') },
+    { id: 'f-ctoso', label: 'I5-OSOPKWY', groupId: 'g-street', src: CT('D12/NB5OsoPkwy') },
+    { id: 'f-ct88', label: 'SR88-PINEGROVE', groupId: 'g-street', src: CT('D10/AMA_EB88_PineGrove') },
+    // Deliberately NOT NB5CrownValley, which is in the catalogue instead: it
+    // publishes irregularly enough to alarm on its own every minute or so. A
+    // default wall that cries wolf out of the box teaches you to ignore it.
+    { id: 'f-ct337', label: 'D7-CCTV337', groupId: 'g-street', src: CT('D7/CCTV-337') },
     {
       id: 'f-dw', label: 'DW-EN', groupId: 'g-news',
       src: 'https://dwamdstream102.akamaized.net/hls/live/2015525/dwstream102/index.m3u8',
@@ -170,6 +199,52 @@ export interface CatalogEntry {
  * whatever you pick, because these rot.
  */
 export const FEED_CATALOG: CatalogEntry[] = [
+  {
+    label: 'Caltrans — NB I-5 at SR-55 (Orange)', code: 'I5-SR55',
+    url: CT('D12/NB5SR55'),
+    note: 'Public highway CCTV. 8s segments, ~5x real-time — comfortable on a wall',
+  },
+  {
+    label: 'Caltrans — NB I-5 at Crown Valley Pkwy (flaps)', code: 'I5-CROWNVLY',
+    url: CT('D12/NB5CrownValley'),
+    // Measured 2026-08-05: the playlist's media sequence stood still for ~14s
+    // at a time and then jumped two segments. Frames really do stop, so the
+    // watchdog is right to call it — this is a true positive from a real
+    // camera, not a tuning artefact, and it is the closest thing here to what
+    // the tool is for.
+    note: 'Publishes irregularly — genuinely stops for ~14s at a time. Alarms on its own, no fault injection needed.',
+  },
+  {
+    label: 'Caltrans — NB I-5 at Oso Pkwy', code: 'I5-OSOPKWY',
+    url: CT('D12/NB5OsoPkwy'),
+    note: 'Public highway CCTV. 10s segments, ~5x real-time',
+  },
+  {
+    label: 'Caltrans — EB SR-88 Pine Grove (Amador)', code: 'SR88-PINEGROVE',
+    url: CT('D10/AMA_EB88_PineGrove'),
+    note: 'Public highway CCTV, mountain road — very little motion, so a freeze is invisible by eye',
+  },
+  {
+    label: 'Caltrans D7 — CCTV-337 (Los Angeles metro)', code: 'D7-CCTV337',
+    url: CT('D7/CCTV-337'),
+    note: 'Public highway CCTV. 250 kbps for 720p — the cheapest feed here',
+  },
+  {
+    label: 'Caltrans D8 — I-10 postmile 515 (Riverside)', code: 'D8-I10-515',
+    url: CT('D8/LB-8_10_515'),
+    note: 'Public highway CCTV, 352x288 — a low-resolution sub-stream, which is what wall tiles should be',
+  },
+  {
+    label: 'Arlington VA — traffic cam 58 (starved)', code: 'ARL-58',
+    url: 'https://itsvideo.arlingtonva.us:8011/live/cam58.stream/playlist.m3u8',
+    // Kept deliberately, like the VOD entry below. This one passes every check
+    // the probe makes — live, CORS-clean on playlist and segments — and is
+    // still unusable: measured on 2026-08-05 it served a 10-second segment in
+    // ~14 seconds, so playback can never catch the live edge. It is the honest
+    // example of a feed that is not "down" and not "up", and of why connection
+    // state cannot answer the question.
+    note: 'Real municipal CCTV that serves BELOW real time — passes every probe, then starves. Worth watching go stale.',
+  },
   {
     label: 'DW English', code: 'DW-EN',
     url: 'https://dwamdstream102.akamaized.net/hls/live/2015525/dwstream102/index.m3u8',
