@@ -13,25 +13,29 @@ import type { Fault, FromWorker, Liveness, ToWorker } from './types';
  * ever happens. Using them here would have been a demo of the wrong thing.
  */
 /**
- * Public live sources.
+ * Public live sources — real broadcast footage, not test patterns.
  *
- * Finding usable ones took real work. Most published "HLS test streams" are
- * VOD — and VOD is useless here: hls.js buffers a VOD asset end-to-end, so it
- * cannot be starved and none of the live-edge behaviour this project measures
- * ever occurs. Of the live candidates: Apple's bipbop serves no CORS header at
- * all; two Akamai demo channels still advertise renditions whose variant
- * playlists now 404; Bitmovin and the AWS samples return 403; Al Jazeera and
- * the Amagi ABC feed fail outright from here.
+ * Both are public-broadcaster news channels published as open HLS with CORS on
+ * playlist and segments, which is the signal that cross-origin playback is
+ * permitted. They are third-party feeds used here for testing; this project
+ * does not own the content.
  *
- * These two hold up — genuinely live (media sequence advances), CORS on both
- * playlist and segments, and multi-variant (500k / 1000k at 1280x720), which
- * is what lets the focused-feed quality policy actually bite.
+ * Rejected along the way, because the failure modes are not obvious:
+ *   - most published "HLS test streams" are VOD. hls.js buffers a VOD asset
+ *     end-to-end (`buffered` came back [10, 300], 208s ahead), so it cannot be
+ *     starved and no live-edge behaviour occurs at all.
+ *   - Unified Streaming's live channels are genuinely live and CORS-clean, but
+ *     they are colour-bar test patterns, not footage.
+ *   - Apple bipbop sends no CORS header; two Akamai demo channels advertise
+ *     variants that 404; Bitmovin/AWS/ZDF return 403; France24's segments are
+ *     not CORS-enabled even though its playlist is.
  *
- * Verified 2026-08-05. Public demo endpoints rot; expect to re-check these.
+ * Verified live 2026-08-05 (media sequence advancing, segments 200 + CORS).
+ * Public endpoints rot — expect to re-check.
  */
 const PUBLIC_SOURCES = [
-  { label: 'LIVE-A', src: 'https://demo.unified-streaming.com/k8s/live/stable/live.isml/.m3u8' },
-  { label: 'LIVE-B', src: 'https://demo.unified-streaming.com/k8s/live/stable/scte35.isml/.m3u8' },
+  { label: 'DW-EN', src: 'https://dwamdstream102.akamaized.net/hls/live/2015525/dwstream102/index.m3u8' },
+  { label: 'TAGESSCHAU', src: 'https://tagesschau.akamaized.net/hls/live/2020115/tagesschau/tagesschau_1/master.m3u8' },
 ];
 
 function sourcesFor(n: number) {

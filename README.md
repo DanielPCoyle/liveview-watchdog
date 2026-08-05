@@ -36,28 +36,28 @@ So liveness also requires **windowed media drift** — how far the media clock m
 
 The point is that the person receiving it gets numbers rather than "camera 3 looks funny". That's the difference between a ticket someone can action and one that starts with a round of questions.
 
-## Sources: real public live streams, and what it took to find them
-
-No local encoder rig, nothing synthetic:
+## Sources: real broadcast footage, and what it took to find it
 
 | | |
 |---|---|
-| `LIVE-A` | `demo.unified-streaming.com/k8s/live/stable/live.isml/.m3u8` |
-| `LIVE-B` | `demo.unified-streaming.com/k8s/live/stable/scte35.isml/.m3u8` |
+| `DW-EN` | Deutsche Welle English — `dwamdstream102.akamaized.net/.../index.m3u8` |
+| `TAGESSCHAU` | ARD Tagesschau — `tagesschau.akamaized.net/.../master.m3u8` |
 
-Both are genuinely live (media sequence advances), serve CORS on playlist **and** segments, are multi-variant (500k / 1000k at 1280x720), and burn a wall clock into the picture — so a stale tile is visible to the eye, not only to the instrumentation.
+Both are public-broadcaster news channels published as open HLS with CORS on playlist **and** segments, which is the signal that cross-origin playback is permitted. They are third-party feeds used here for testing; this project does not own the content.
 
-Getting to two working sources meant rejecting most of the field:
+Getting to two working sources meant rejecting most of the field, and the failure modes are not obvious:
 
 | Candidate | Why |
 |---|---|
-| `test-streams.mux.dev`, `mux-pts-shift` | **VOD.** hls.js buffers a VOD asset end-to-end — `buffered` came back `[10, 300]`, 208s ahead — so it cannot be starved and no live-edge behaviour occurs. An earlier version of this project was built on one of these, which meant demoing a live product on video-on-demand. |
+| `test-streams.mux.dev`, `mux-pts-shift` | **VOD.** hls.js buffers a VOD asset end-to-end — `buffered` came back `[10, 300]`, 208s ahead — so it cannot be starved and no live-edge behaviour occurs. An earlier version of this project ran on one of these, which meant demoing a live product on video-on-demand. |
+| Unified Streaming live channels | Genuinely live and CORS-clean, but **colour-bar test patterns**, not footage. Fine for correctness, useless for showing what the thing is actually for. |
 | Apple `bipbop` | No `Access-Control-Allow-Origin` header at all. |
 | Akamai `cph-p2p-msl`, `moctobpltc` | Masters resolve; their advertised variant playlists **404**. |
-| Bitmovin, AWS `skip_armstrong` | 403. |
-| Al Jazeera, Amagi/ABC | Connection failure / 500. |
+| Bitmovin, AWS `skip_armstrong`, ZDF | 403. |
+| France24 | Playlist is CORS-enabled; **segments are not**. |
+| Al Jazeera, Amagi/ABC, Das Erste, Euronews | Connection failure / 500 / no CORS. |
 
-Public demo endpoints rot. Verified 2026-08-05.
+Verified live 2026-08-05 — media sequence advancing, segments returning 200 with CORS. Public endpoints rot; expect to re-check.
 
 **What using public feeds costs.** An earlier version generated local HLS with ffmpeg, which allowed killing a camera at the *encoder* with `SIGSTOP` — the most honest possible "the camera died". You can't do that to someone else's stream, so `freeze` is now client-side `hls.stopLoad()`: the small live buffer starves in seconds, then hls.js drops into its reload loop. That exercises the *harder* detection path rather than the easy one.
 
