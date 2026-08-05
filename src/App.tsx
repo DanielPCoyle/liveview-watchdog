@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTile } from './useTile';
 import { useLongTasks, useJankInjector } from './perf';
-import { VideoWall, type WallStreamRef } from './VideoWall';
+import { VideoWall, computeLayout, VW, VH, type Box, type WallStreamRef } from './VideoWall';
 import type { Fault, FromWorker, Liveness, ToWorker } from './types';
 
 /**
@@ -12,102 +12,225 @@ import type { Fault, FromWorker, Liveness, ToWorker } from './types';
  * can't be starved and none of the live-edge behaviour this project measures
  * ever happens. Using them here would have been a demo of the wrong thing.
  */
-const CAMERA_COUNT = 4;
-const SOURCES = Array.from({ length: CAMERA_COUNT }, (_, i) => ({
-  label: `CAM ${i + 1}`,
-  src: `/live/cam${i + 1}/index.m3u8`,
-}));
+/**
+ * Public live sources.
+ *
+ * Finding usable ones took real work. Most published "HLS test streams" are
+ * VOD — and VOD is useless here: hls.js buffers a VOD asset end-to-end, so it
+ * cannot be starved and none of the live-edge behaviour this project measures
+ * ever occurs. Of the live candidates: Apple's bipbop serves no CORS header at
+ * all; two Akamai demo channels still advertise renditions whose variant
+ * playlists now 404; Bitmovin and the AWS samples return 403; Al Jazeera and
+ * the Amagi ABC feed fail outright from here.
+ *
+ * These two hold up — genuinely live (media sequence advances), CORS on both
+ * playlist and segments, and multi-variant (500k / 1000k at 1280x720), which
+ * is what lets the focused-feed quality policy actually bite.
+ *
+ * Verified 2026-08-05. Public demo endpoints rot; expect to re-check these.
+ */
+const PUBLIC_SOURCES = [
+  { label: 'LIVE-A', src: 'https://demo.unified-streaming.com/k8s/live/stable/live.isml/.m3u8' },
+  { label: 'LIVE-B', src: 'https://demo.unified-streaming.com/k8s/live/stable/scte35.isml/.m3u8' },
+];
+
+function sourcesFor(n: number) {
+  return Array.from({ length: n }, (_, i) => {
+    const s = PUBLIC_SOURCES[i % PUBLIC_SOURCES.length];
+    const dup = Math.floor(i / PUBLIC_SOURCES.length);
+    return { label: dup ? `${s.label}·${dup + 1}` : s.label, src: s.src, faultable: true as const };
+  });
+}
 
 const DEGRADED_AFTER_MS = 400;
 const STALE_AFTER_MS = 1200;
 
-interface WorkerStatus { liveness: Liveness; staleMs: number; drift: number | null }
-type Mode = 'dom' | 'webgl';
+/**
+ * How long a recovered feed stays promoted after its signal returns. Snapping
+ * it back the instant frames resume is worse than not promoting it: the tile
+ * vanishes with no explanation. Hold it, say "signal restored", then shrink.
+ */
+const RESOLVE_HOLD_MS = 4000;
 
+interface WorkerStatus { liveness: Liveness; staleMs: number; drift: number | null }
 interface Incident { at: string; cam: string; text: string; kind: 'lost' | 'restored' }
 
-// ── DOM presentation: one <video> element per tile ─────────────────────────
-function Tile(props: {
-  id: string; label: string; src: string; fault: Fault;
-  status: WorkerStatus | undefined;
-  onFrame: (id: string, at: number, mediaTime: number) => void;
-  onIdle: (id: string) => void;
-  onFaultChange: (id: string, f: Fault) => void;
-  showNaiveOnly: boolean;
-  focused?: boolean;
-  variant?: 'grid' | 'hero' | 'strip';
-  onSelect?: (id: string) => void;
-}) {
-  const { attachRef, naive, stats } = useTile({
-    id: props.id, src: props.src, fault: props.fault, focused: props.focused,
-    onFrame: props.onFrame, onIdle: props.onIdle,
-  });
-  const st = props.status;
-  const liveness = st?.liveness ?? 'idle';
-  const variant = props.variant ?? 'grid';
-
-  return (
-    <div
-      className={`tile tile--${variant} tile--${props.showNaiveOnly ? naive : liveness}`}
-      onClick={variant === 'hero' ? undefined : () => props.onSelect?.(props.id)}
-      role={variant === 'hero' ? undefined : 'button'}
-      tabIndex={variant === 'hero' ? undefined : 0}
-      onKeyDown={variant === 'hero' ? undefined : (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); props.onSelect?.(props.id); } }}
-      title={variant === 'hero' ? undefined : 'Open this feed'}
-    >
-      <video ref={attachRef} muted playsInline />
-      <div className="tile__bar">
-        <span className="tile__label">{props.label}</span>
-        {props.showNaiveOnly ? (
-          <span className={`pill pill--${naive}`}>{naive}</span>
-        ) : (
-          <span className={`pill pill--${liveness}`}>
-            {liveness}
-            {liveness !== 'idle' && liveness !== 'live' ? ` ${(st!.staleMs / 1000).toFixed(1)}s` : ''}
-          </span>
-        )}
-      </div>
-
-      {!props.showNaiveOnly && variant !== 'strip' && (
-        <dl className="tile__stats">
-          <div><dt>interval p50/p95</dt><dd>{stats.p50IntervalMs ?? '–'} / {stats.p95IntervalMs ?? '–'} ms</dd></div>
-          <div><dt>decoded</dt><dd>{stats.totalFrames}</dd></div>
-          <div><dt>dropped</dt><dd className={(stats.droppedPct ?? 0) > 1 ? 'warn' : ''}>
-            {stats.droppedFrames}{stats.droppedPct != null ? ` (${stats.droppedPct}%)` : ''}
-          </dd></div>
-          <div><dt>media drift</dt><dd className={st?.drift != null && st.drift < 0.5 ? 'bad' : ''}>{st?.drift == null ? '–' : st.drift.toFixed(2)}</dd></div>
-        </dl>
-      )}
-
-      {variant !== 'strip' && (
-        <div className="tile__faults">
-          {(['none', 'freeze', 'lowQuality'] as Fault[]).map((f) => (
-            <button key={f} className={props.fault === f ? 'on' : ''}
-              onClick={(e) => { e.stopPropagation(); props.onFaultChange(props.id, f); }}>
-              {f === 'none' ? 'healthy' : f === 'freeze' ? 'freeze' : 'low-q'}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
+/**
+ * An escalation is a snapshot, not a message. The evidence is captured at the
+ * moment of reporting — liveness, how long it has been stale, media drift,
+ * decode and drop counts — so the person receiving it gets numbers rather than
+ * "camera 3 looks funny". That is the difference between a ticket someone can
+ * action and one that starts with a round of questions.
+ */
+interface Escalation {
+  id: string;
+  at: string;
+  cam: string;
+  severity: 'low' | 'medium' | 'high';
+  note: string;
+  evidence: {
+    liveness: Liveness; staleMs: number; drift: number | null;
+    decoded: number; dropped: number; droppedPct: number | null;
+    source: string;
+  };
 }
 
-// ── WebGL presentation: video decodes offscreen, GPU composites the wall ───
-function WallStream(props: {
-  id: string; src: string; fault: Fault; focused?: boolean;
+function pct(b: Box) {
+  return {
+    left: `${((b.x - b.w / 2) / VW) * 100}%`,
+    top: `${((VH - (b.y + b.h / 2)) / VH) * 100}%`,
+    width: `${(b.w / VW) * 100}%`,
+    height: `${(b.h / VH) * 100}%`,
+  };
+}
+
+/**
+ * One stream: decodes into an offscreen <video> (portalled into the decode
+ * pool) and renders its own chrome as a DOM overlay positioned over the WebGL
+ * canvas. WebGL draws the picture; DOM draws the HUD. Keeping the stats in the
+ * component that owns the decoder avoids pushing a 400ms-cadence stats stream
+ * for every tile up into app state.
+ */
+function Stream(props: {
+  id: string; label: string; src: string; fault: Fault;
+  box: Box | undefined; isHero: boolean; resolved: boolean;
+  status: WorkerStatus | undefined; showNaive: boolean;
   onFrame: (id: string, at: number, mediaTime: number) => void;
   onIdle: (id: string) => void;
   onEl: (id: string, el: HTMLVideoElement | null) => void;
+  onFaultChange: (id: string, f: Fault) => void;
+  onToggleFocus: (id: string) => void;
+  onReport: (id: string, cam: string, ev: Escalation['evidence']) => void;
+  faultable: boolean;
 }) {
-  const { attachRef } = useTile({
-    id: props.id, src: props.src, fault: props.fault, focused: props.focused,
+  const { attachRef, naive, stats } = useTile({
+    id: props.id, src: props.src, fault: props.fault, focused: props.isHero,
     onFrame: props.onFrame, onIdle: props.onIdle,
   });
   const { onEl, id } = props;
-  const ref = useCallback((el: HTMLVideoElement | null) => { attachRef(el); onEl(id, el); }, [attachRef, onEl, id]);
-  // Kept in the document (not display:none) so decoding continues.
-  return <video ref={ref} muted playsInline />;
+  const videoRef = useCallback((el: HTMLVideoElement | null) => { attachRef(el); onEl(id, el); }, [attachRef, onEl, id]);
+
+  const st = props.status;
+  const liveness = st?.liveness ?? 'idle';
+  const shown = props.showNaive ? naive : liveness;
+
+  return (
+    <>
+      {/* The decoder. Hidden by CSS rather than portalled elsewhere: moving an
+          element between parents remounts it, which tears down the hls.js
+          attachment and leaves a dead readyState-0 element behind. */}
+      <video className="decoder" ref={videoRef} muted playsInline />
+      {props.box && (
+        <div className={`ov ov--${shown} ${props.isHero ? 'ov--hero' : ''}`} style={pct(props.box)}
+          onClick={() => props.onToggleFocus(props.id)}
+          role="button" tabIndex={0}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); props.onToggleFocus(props.id); } }}
+          title={props.isHero ? 'Return this feed to the wall' : 'Open this feed'}
+        >
+          {props.resolved && <div className="toast">Signal restored</div>}
+          <div className="ov__bar">
+            <span className="ov__label">{props.label}</span>
+            <span className={`pill pill--${shown}`}>
+              {shown}
+              {!props.showNaive && liveness !== 'idle' && liveness !== 'live' ? ` ${(st!.staleMs / 1000).toFixed(1)}s` : ''}
+            </span>
+          </div>
+
+          {props.isHero && !props.showNaive && (
+            <dl className="ov__stats">
+              <div><dt>decode interval</dt><dd>{stats.p50IntervalMs ?? '–'} ms</dd></div>
+              <div><dt>decoded</dt><dd>{stats.totalFrames}</dd></div>
+              <div><dt>dropped</dt><dd className={(stats.droppedPct ?? 0) > 1 ? 'warn' : ''}>
+                {stats.droppedFrames}{stats.droppedPct != null ? ` (${stats.droppedPct}%)` : ''}
+              </dd></div>
+              <div><dt>media drift</dt><dd className={st?.drift != null && st.drift < 0.35 ? 'bad' : ''}>{st?.drift == null ? '–' : st.drift.toFixed(2)}</dd></div>
+            </dl>
+          )}
+
+          {props.isHero && (
+            <div className="ov__faults">
+              {(['none', 'freeze', 'lowQuality'] as Fault[]).map((f) => (
+                <button key={f} className={props.fault === f ? 'on' : ''}
+                  onClick={(e) => { e.stopPropagation(); props.onFaultChange(props.id, f); }}>
+                  {f === 'none' ? 'healthy' : f === 'freeze' ? 'freeze' : 'low-q'}
+                </button>
+              ))}
+              <button className="ov__report"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  // Snapshot the evidence at the moment of reporting, from the
+                  // component that actually owns the decoder.
+                  props.onReport(props.id, props.label, {
+                    liveness, staleMs: st?.staleMs ?? 0, drift: st?.drift ?? null,
+                    decoded: stats.totalFrames, dropped: stats.droppedFrames,
+                    droppedPct: stats.droppedPct, source: props.src,
+                  });
+                }}>report incident</button>
+            </div>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
+function ReportDialog(props: {
+  pending: { id: string; cam: string; evidence: Escalation['evidence'] };
+  onSubmit: (severity: Escalation['severity'], note: string) => void;
+  onCancel: () => void;
+}) {
+  const [severity, setSeverity] = useState<Escalation['severity']>('medium');
+  const [note, setNote] = useState('');
+  const ev = props.pending.evidence;
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') props.onCancel(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [props]);
+
+  return (
+    <div className="modal" role="dialog" aria-modal="true" aria-label="Report incident"
+      onClick={(e) => { if (e.target === e.currentTarget) props.onCancel(); }}>
+      <form className="modal__panel" onSubmit={(e) => { e.preventDefault(); props.onSubmit(severity, note); }}>
+        <h2>Escalate — {props.pending.cam}</h2>
+
+        <label className="field">
+          <span>Severity</span>
+          <select value={severity} onChange={(e) => setSeverity(e.target.value as Escalation['severity'])}>
+            <option value="low">Low — note for review</option>
+            <option value="medium">Medium — needs attention</option>
+            <option value="high">High — acting on this now</option>
+          </select>
+        </label>
+
+        <label className="field">
+          <span>What did you see?</span>
+          <textarea rows={3} value={note} autoFocus
+            onChange={(e) => setNote(e.target.value)}
+            placeholder="Optional. The measurements below are attached automatically." />
+        </label>
+
+        {/* Attached automatically — the point of the feature. */}
+        <div className="field">
+          <span>Attached evidence</span>
+          <dl className="evidence">
+            <div><dt>liveness</dt><dd className={ev.liveness === 'stale' ? 'bad' : ''}>{ev.liveness}</dd></div>
+            <div><dt>stale for</dt><dd>{(ev.staleMs / 1000).toFixed(1)}s</dd></div>
+            <div><dt>media drift</dt><dd className={ev.drift != null && ev.drift < 0.35 ? 'bad' : ''}>{ev.drift == null ? '–' : ev.drift.toFixed(2)}</dd></div>
+            <div><dt>decoded</dt><dd>{ev.decoded}</dd></div>
+            <div><dt>dropped</dt><dd>{ev.dropped}{ev.droppedPct != null ? ` (${ev.droppedPct}%)` : ''}</dd></div>
+            <div className="evidence__src"><dt>source</dt><dd>{ev.source}</dd></div>
+          </dl>
+        </div>
+
+        <div className="modal__actions">
+          <button type="button" onClick={props.onCancel}>Cancel</button>
+          <button type="submit" className="on">Submit escalation</button>
+        </div>
+      </form>
+    </div>
+  );
 }
 
 export default function App() {
@@ -115,13 +238,17 @@ export default function App() {
   const [faults, setFaults] = useState<Record<string, Fault>>({});
   const [statuses, setStatuses] = useState<Record<string, WorkerStatus>>({});
   const [jank, setJank] = useState(false);
-  const [showNaiveOnly, setShowNaiveOnly] = useState(false);
-  const [mode, setMode] = useState<Mode>('dom');
+  const [showNaive, setShowNaive] = useState(false);
   const [wallFps, setWallFps] = useState(0);
-  const [elVersion, setElVersion] = useState(0);
-  const [focusedId, setFocusedId] = useState<string | null>(null);
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [clock, setClock] = useState(() => new Date().toLocaleTimeString());
+  const [elVersion, setElVersion] = useState(0);
+
+  const [escalations, setEscalations] = useState<Escalation[]>([]);
+  const [reporting, setReporting] = useState<{ id: string; cam: string; evidence: Escalation['evidence'] } | null>(null);
+  const [autoPromote, setAutoPromote] = useState(true);
+  const [manualIds, setManualIds] = useState<string[]>([]);
+  const [resolving, setResolving] = useState<Record<string, number>>({});
 
   const workerRef = useRef<Worker | null>(null);
   const elsRef = useRef<Record<string, HTMLVideoElement | null>>({});
@@ -135,10 +262,7 @@ export default function App() {
   }, []);
 
   const tiles = useMemo(
-    () => Array.from({ length: tileCount }, (_, i) => {
-      const s = SOURCES[i % SOURCES.length];
-      return { id: `t${i}`, label: tileCount > SOURCES.length ? `${s.label}·${Math.floor(i / SOURCES.length) + 1}` : s.label, src: s.src };
-    }),
+    () => sourcesFor(tileCount).map((s, i) => ({ id: `t${i}`, ...s })),
     [tileCount],
   );
 
@@ -164,22 +288,82 @@ export default function App() {
     }
   }, [tiles]);
 
-  // Incident log — transitions in and out of stale, timestamped. The record an
-  // operator would actually be asked for afterwards.
+  // Incident log + resolve-hold.
   useEffect(() => {
     const add: Incident[] = [];
+    const recovered: string[] = [];
     for (const t of tiles) {
       const now = statuses[t.id]?.liveness;
       if (!now) continue;
       const was = prevLiveness.current[t.id];
       if (was && was !== now) {
         if (now === 'stale') add.push({ at: new Date().toLocaleTimeString(), cam: t.label, text: 'signal lost — frames stopped arriving', kind: 'lost' });
-        else if (was === 'stale') add.push({ at: new Date().toLocaleTimeString(), cam: t.label, text: 'signal restored', kind: 'restored' });
+        else if (was === 'stale') { add.push({ at: new Date().toLocaleTimeString(), cam: t.label, text: 'signal restored', kind: 'restored' }); recovered.push(t.id); }
       }
       prevLiveness.current[t.id] = now;
     }
     if (add.length) setIncidents((prev) => [...add, ...prev].slice(0, 40));
+    if (recovered.length) {
+      setResolving((prev) => {
+        const next = { ...prev };
+        for (const id of recovered) next[id] = Date.now() + RESOLVE_HOLD_MS;
+        return next;
+      });
+    }
   }, [statuses, tiles]);
+
+  // Retire holds — this is what shrinks a recovered feed back to the carousel.
+  useEffect(() => {
+    if (!Object.keys(resolving).length) return;
+    const t = window.setInterval(() => {
+      const now = Date.now();
+      setResolving((prev) => {
+        const next: Record<string, number> = {};
+        let changed = false;
+        for (const [id, until] of Object.entries(prev)) { if (until > now) next[id] = until; else changed = true; }
+        return changed ? next : prev;
+      });
+    }, 400);
+    return () => window.clearInterval(t);
+  }, [resolving]);
+
+  const staleIds = useMemo(
+    () => tiles.filter((t) => statuses[t.id]?.liveness === 'stale').map((t) => t.id),
+    [tiles, statuses],
+  );
+
+  /**
+   * Who occupies the main area. Manual picks always count; with auto-promote on,
+   * anything in signal loss joins them, and anything that just recovered lingers
+   * for RESOLVE_HOLD_MS so its toast can be read.
+   */
+  const heroIds = useMemo(() => {
+    const set = new Set(manualIds);
+    if (autoPromote) {
+      staleIds.forEach((id) => set.add(id));
+      Object.keys(resolving).forEach((id) => set.add(id));
+    }
+    return tiles.filter((t) => set.has(t.id)).map((t) => t.id);   // stable order
+  }, [manualIds, autoPromote, staleIds, resolving, tiles]);
+
+  const heroKey = heroIds.join(',');
+  const layout = useMemo(() => computeLayout(tiles.map((t) => t.id), heroIds), [tiles, heroKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const onToggleFocus = useCallback((id: string) => {
+    setManualIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  }, []);
+  const clearFocus = useCallback(() => { setManualIds([]); setResolving({}); }, []);
+
+  useEffect(() => {
+    if (!heroKey) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') clearFocus(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [heroKey, clearFocus]);
+
+  useEffect(() => {
+    setManualIds((prev) => prev.filter((id) => tiles.some((t) => t.id === id)));
+  }, [tiles]);
 
   const onFrame = useCallback((id: string, at: number, mediaTime: number) => {
     workerRef.current?.postMessage({ type: 'frame', id, at, mediaTime } satisfies ToWorker);
@@ -190,40 +374,35 @@ export default function App() {
   const onFaultChange = useCallback((id: string, f: Fault) => {
     setFaults((prev) => ({ ...prev, [id]: f }));
   }, []);
-  // Video elements arrive via ref callbacks AFTER mount. A ref mutation can't
-  // tell React anything, so bump a version to recompute the stream list once
-  // the elements actually exist — otherwise the wall builds against nulls and
-  // renders black tiles.
   const onEl = useCallback((id: string, el: HTMLVideoElement | null) => {
     if (elsRef.current[id] === el) return;
     elsRef.current[id] = el;
     setElVersion((v) => v + 1);
   }, []);
   const onFps = useCallback((f: number) => setWallFps(f), []);
-  const onFocus = useCallback((id: string | null) => setFocusedId(id), []);
-
-  // Escape always returns to the grid — an operator shouldn't have to find a
-  // close button to get their whole wall back.
-  useEffect(() => {
-    if (!focusedId) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setFocusedId(null); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [focusedId]);
-
-  // A feed that vanishes (wall resized smaller) must not stay focused.
-  useEffect(() => {
-    if (focusedId && !tiles.some((t) => t.id === focusedId)) setFocusedId(null);
-  }, [tiles, focusedId]);
+  const onReport = useCallback((id: string, cam: string, evidence: Escalation['evidence']) => {
+    setReporting({ id, cam, evidence });
+  }, []);
+  // Deliberately NOT nesting setEscalations inside a setReporting updater:
+  // React invokes updater functions twice under StrictMode, which duplicated
+  // every escalation. Updaters must be pure; read the pending value directly.
+  const submitEscalation = useCallback((severity: Escalation['severity'], note: string) => {
+    if (!reporting) return;
+    const entry: Escalation = {
+      id: `${reporting.id}-${Date.now()}`,
+      at: new Date().toLocaleTimeString(),
+      cam: reporting.cam, severity, note: note.trim(), evidence: reporting.evidence,
+    };
+    setEscalations((prev) => [entry, ...prev].slice(0, 50));
+    setReporting(null);
+  }, [reporting]);
 
   const wallStreams: WallStreamRef[] = useMemo(
     () => tiles.map((t) => ({ id: t.id, el: elsRef.current[t.id] ?? null })),
-    // elVersion is the signal that refs changed; tiles covers set changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [tiles, elVersion],
   );
 
-  // Plain id → liveness map, so status ticks never invalidate wall layout.
   const statusById = useMemo(() => {
     const m: Record<string, Liveness> = {};
     for (const t of tiles) m[t.id] = statuses[t.id]?.liveness ?? 'idle';
@@ -231,7 +410,6 @@ export default function App() {
   }, [tiles, statuses]);
 
   const liveCount = tiles.filter((t) => statuses[t.id]?.liveness === 'live').length;
-  const staleCount = tiles.filter((t) => statuses[t.id]?.liveness === 'stale').length;
 
   return (
     <div className="app">
@@ -247,9 +425,9 @@ export default function App() {
       <section className="strip">
         <div><span>feeds</span><strong>{tiles.length}</strong></div>
         <div><span>live</span><strong className="ok">{liveCount}</strong></div>
-        <div><span>signal lost</span><strong className={staleCount ? 'bad' : ''}>{staleCount}</strong></div>
-        <div><span>compositor</span><strong>{mode === 'webgl' ? 'GPU' : 'DOM'}</strong></div>
-        <div><span>wall fps</span><strong>{mode === 'webgl' ? wallFps.toFixed(0) : '–'}</strong></div>
+        <div><span>signal lost</span><strong className={staleIds.length ? 'bad' : ''}>{staleIds.length}</strong></div>
+        <div><span>promoted</span><strong>{heroIds.length}</strong></div>
+        <div><span>wall fps</span><strong>{wallFps.toFixed(0)}</strong></div>
         <div><span>long tasks</span><strong className={perf.longTasks ? 'warn' : ''}>{perf.longTasks}</strong></div>
         <div><span>blocking</span><strong>{(perf.blockedMs / 1000).toFixed(1)}s</strong></div>
       </section>
@@ -260,69 +438,58 @@ export default function App() {
           <input type="range" min={1} max={64} value={tileCount} onChange={(e) => setTileCount(Number(e.target.value))} />
           <output>{tileCount}</output>
         </label>
-        <button className={mode === 'webgl' ? 'on' : ''} onClick={() => setMode((m) => (m === 'dom' ? 'webgl' : 'dom'))}>
-          compositor: {mode === 'webgl' ? 'GPU (three.js)' : 'DOM <video>'}
+        <button className={autoPromote ? 'on' : ''} onClick={() => setAutoPromote((v) => !v)}
+          title="Promote any feed that loses signal into the main area automatically">
+          auto-promote on signal loss: {autoPromote ? 'on' : 'off'}
         </button>
         <button className={jank ? 'on' : ''} onClick={() => setJank((v) => !v)}>
           {jank ? 'stop main-thread jank' : 'inject main-thread jank'}
         </button>
-        {mode === 'dom' && (
-          <button className={showNaiveOnly ? 'on' : ''} onClick={() => setShowNaiveOnly((v) => !v)}>
-            {showNaiveOnly ? 'showing: naive "is it connected?"' : 'showing: frame-aware watchdog'}
-          </button>
-        )}
+        <button className={showNaive ? 'on' : ''} onClick={() => setShowNaive((v) => !v)}>
+          {showNaive ? 'showing: naive "is it connected?"' : 'showing: frame-aware watchdog'}
+        </button>
+        {heroIds.length > 0 && <button onClick={clearFocus}>✕ back to wall (Esc)</button>}
       </section>
 
       <div className="stage">
-        {mode === 'dom' ? (
-          focusedId ? (
-            <main className="focus">
-              <div className="focus__hero">
-                {tiles.filter((t) => t.id === focusedId).map((t) => (
-                  <Tile key={t.id} id={t.id} label={t.label} src={t.src} variant="hero" focused
-                    fault={faults[t.id] ?? 'none'} status={statuses[t.id]}
-                    onFrame={onFrame} onIdle={onIdle} onFaultChange={onFaultChange}
-                    showNaiveOnly={showNaiveOnly} />
-                ))}
-                <button className="focus__close" onClick={() => setFocusedId(null)} aria-label="Back to grid (Esc)">✕</button>
-              </div>
-              <div className="focus__strip">
-                {tiles.filter((t) => t.id !== focusedId).map((t) => (
-                  <Tile key={t.id} id={t.id} label={t.label} src={t.src} variant="strip"
-                    fault={faults[t.id] ?? 'none'} status={statuses[t.id]}
-                    onFrame={onFrame} onIdle={onIdle} onFaultChange={onFaultChange}
-                    showNaiveOnly={showNaiveOnly} onSelect={setFocusedId} />
-                ))}
-              </div>
-            </main>
-          ) : (
-            <main className="grid">
-              {tiles.map((t) => (
-                <Tile key={t.id} id={t.id} label={t.label} src={t.src} variant="grid"
-                  fault={faults[t.id] ?? 'none'} status={statuses[t.id]}
-                  onFrame={onFrame} onIdle={onIdle} onFaultChange={onFaultChange}
-                  showNaiveOnly={showNaiveOnly} onSelect={setFocusedId} />
-              ))}
-            </main>
-          )
-        ) : (
-          <div className="wall-host">
-            <div className="decode-pool" aria-hidden>
-              {tiles.map((t) => (
-                <WallStream key={t.id} id={t.id} src={t.src} fault={faults[t.id] ?? 'none'}
-                  focused={focusedId === t.id}
-                  onFrame={onFrame} onIdle={onIdle} onEl={onEl} />
-              ))}
-            </div>
-            <VideoWall streams={wallStreams} statusById={statusById}
-              focusedId={focusedId} onFocus={onFocus} onFps={onFps} />
-            {focusedId && (
-              <button className="focus__close focus__close--wall" onClick={() => setFocusedId(null)} aria-label="Back to grid (Esc)">✕</button>
-            )}
+        <div className="wall-host">
+          <VideoWall streams={wallStreams} statusById={statusById}
+            heroIds={heroIds} onToggleFocus={onToggleFocus} onFps={onFps} />
+          <div className="overlays">
+            {tiles.map((t) => (
+              <Stream key={t.id} id={t.id} label={t.label} src={t.src}
+                fault={faults[t.id] ?? 'none'} box={layout.get(t.id)}
+                isHero={heroIds.includes(t.id)} resolved={!!resolving[t.id]}
+                status={statuses[t.id]} showNaive={showNaive}
+                onFrame={onFrame} onIdle={onIdle} onEl={onEl}
+                onFaultChange={onFaultChange} onToggleFocus={onToggleFocus}
+                onReport={onReport} faultable={t.faultable} />
+            ))}
           </div>
-        )}
+        </div>
 
         <aside className="log">
+          {escalations.length > 0 && (
+            <>
+              <h2>Escalations
+                <button className="log__copy" title="Copy as JSON"
+                  onClick={() => void navigator.clipboard?.writeText(JSON.stringify(escalations, null, 2))}>copy</button>
+              </h2>
+              <ul className="esc">
+                {escalations.map((e) => (
+                  <li key={e.id} className={`esc--${e.severity}`}>
+                    <time>{e.at}</time>
+                    <span className="log__cam">{e.cam}</span>
+                    <span className="esc__sev">{e.severity}</span>
+                    {e.note && <span className="esc__note">{e.note}</span>}
+                    <span className="esc__ev">
+                      {e.evidence.liveness} · stale {(e.evidence.staleMs / 1000).toFixed(1)}s · drift {e.evidence.drift == null ? '–' : e.evidence.drift.toFixed(2)} · dropped {e.evidence.dropped}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
           <h2>Incidents</h2>
           {incidents.length === 0 ? (
             <p className="log__empty">No signal loss recorded.</p>
@@ -338,10 +505,15 @@ export default function App() {
             </ul>
           )}
           <p className="log__note">
-            Use <code>scripts/cameras.sh freeze N</code> to stop a camera at the encoder.
+            Promote a feed and hit <code>freeze</code> to cut it off at the client, or
+            <code>report incident</code> to escalate with the measurements attached.
           </p>
         </aside>
       </div>
+
+      {reporting && (
+        <ReportDialog pending={reporting} onSubmit={submitEscalation} onCancel={() => setReporting(null)} />
+      )}
     </div>
   );
 }

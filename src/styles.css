@@ -77,85 +77,76 @@ button.on { background: var(--ink); color: var(--bg); border-color: var(--ink); 
 }
 @media (max-width: 900px) { .stage { grid-template-columns: minmax(0, 1fr); } }
 
-.grid {
-  padding: 14px; overflow: auto;
-  display: grid; gap: 12px;
-  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-  align-content: start;
-}
-
-.wall { min-height: 0; min-width: 0; }
-.wall-host { position: relative; min-height: 0; min-width: 0; display: grid; }
+.wall { position: absolute; inset: 0; }
+.wall-host { position: relative; min-height: 0; min-width: 0; overflow: hidden; }
 .wall canvas { cursor: pointer; }
 
-/* ── focus view: hero + carousel ────────────────────────────────────────── */
-.focus {
-  display: grid; grid-template-rows: minmax(0, 1fr) auto;
-  gap: 12px; padding: 14px; min-height: 0;
+/* Decoders stay in the document — display:none stops decoding — but they are
+   never what you look at: the canvas is. Hidden in place rather than moved to
+   a pool, because reparenting remounts the element and kills the hls attach. */
+.decoder {
+  position: absolute; left: 0; top: 0; width: 2px; height: 2px;
+  opacity: 0.01; pointer-events: none;
 }
-.focus__hero { position: relative; min-height: 0; display: grid; }
-.focus__hero .tile { display: grid; grid-template-rows: minmax(0, 1fr) auto auto; }
-.focus__hero .tile video { height: 100%; aspect-ratio: auto; }
 
-.focus__strip {
-  display: flex; gap: 10px; overflow-x: auto; overflow-y: hidden;
-  padding-bottom: 4px; scrollbar-width: thin;
+/* ── DOM overlay chrome on top of the WebGL wall ────────────────────────── */
+.overlays { position: absolute; inset: 0; pointer-events: none; }
+
+.ov {
+  position: absolute; pointer-events: auto; cursor: pointer;
+  display: flex; flex-direction: column; justify-content: flex-end;
+  /* Eased to match the render loop's lerp so chrome tracks the video. */
+  transition: left .42s cubic-bezier(.22,.61,.36,1), top .42s cubic-bezier(.22,.61,.36,1),
+              width .42s cubic-bezier(.22,.61,.36,1), height .42s cubic-bezier(.22,.61,.36,1);
 }
-.focus__strip .tile { flex: 0 0 190px; }
+.ov:hover .ov__bar { background: color-mix(in srgb, var(--bg) 72%, transparent); }
+.ov:focus-visible { outline: 2px solid var(--bad); outline-offset: -2px; }
 
-.focus__close {
-  position: absolute; top: 10px; right: 10px; z-index: 3;
-  width: 30px; height: 30px; padding: 0; font-size: 14px; line-height: 1;
-  border-radius: 4px; background: color-mix(in srgb, var(--bg) 78%, transparent);
-  border: 1px solid var(--rule); backdrop-filter: blur(3px);
+.ov__bar {
+  display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  padding: 5px 8px; background: color-mix(in srgb, var(--bg) 55%, transparent);
+  backdrop-filter: blur(2px);
 }
-.focus__close:hover { background: var(--ink); color: var(--bg); border-color: var(--ink); }
-.focus__close--wall { top: 14px; right: 14px; }
-
-.tile--grid, .tile--strip { cursor: pointer; }
-.tile--grid:hover, .tile--strip:hover { border-color: color-mix(in srgb, var(--ink) 40%, var(--rule)); }
-.tile--strip .tile__bar { padding: 6px 8px; }
-.tile--strip .tile__label { font-size: 10px; }
-
-/* Decoders stay in the document — display:none would stop decoding — but they
-   are never what you look at in GPU mode; the canvas is. */
-.decode-pool {
-  position: fixed; left: 0; top: 0; width: 2px; height: 2px;
-  overflow: hidden; opacity: 0.01; pointer-events: none;
-}
-.decode-pool video { width: 2px; height: 2px; }
-
-/* ── tiles (DOM compositor) ─────────────────────────────────────────────── */
-/* Status is carried by the whole tile frame, the way a camera wall actually
-   indicates per-feed state — not a left accent rail. Healthy feeds stay quiet;
-   only a lost signal is allowed to shout. */
-.tile { border: 1px solid var(--rule); border-radius: 6px; overflow: hidden; background: var(--panel); }
-.tile--live, .tile--connected { border-color: color-mix(in srgb, var(--ok-ink) 45%, var(--rule)); }
-.tile--degraded { border-color: color-mix(in srgb, var(--warn) 65%, var(--rule)); }
-.tile--stale, .tile--error { border-color: var(--bad); box-shadow: 0 0 0 1px var(--bad) inset; }
-.tile--idle { border-color: var(--rule); }
-
-.tile video { display: block; width: 100%; aspect-ratio: 16/9; background: #000; object-fit: cover; }
-
-.tile__bar { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 10px; }
-.tile__label { font-size: 11px; color: var(--muted); letter-spacing: .06em; }
+.ov__label { font-size: 10.5px; letter-spacing: .07em; }
 
 .pill {
-  font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase;
-  padding: 3px 7px; border-radius: 3px; border: 1px solid currentColor;
+  font-size: 9px; letter-spacing: .08em; text-transform: uppercase;
+  padding: 2px 6px; border-radius: 3px; border: 1px solid currentColor;
+  white-space: nowrap;
 }
 .pill--live, .pill--connected { color: var(--ok-ink); }
 .pill--degraded { color: var(--warn); }
 .pill--stale, .pill--error { color: var(--bad); }
 .pill--idle { color: var(--muted); }
 
-.tile__stats { margin: 0; padding: 0 10px 8px; display: grid; grid-template-columns: 1fr 1fr; gap: 3px 10px; }
-.tile__stats > div { display: flex; justify-content: space-between; gap: 6px; }
-.tile__stats dt { font-size: 9.5px; color: var(--muted); }
-.tile__stats dd { margin: 0; font-size: 10.5px; font-variant-numeric: tabular-nums; }
+.ov__stats {
+  margin: 0; padding: 6px 8px; display: grid; grid-template-columns: 1fr 1fr; gap: 2px 10px;
+  background: color-mix(in srgb, var(--bg) 62%, transparent); backdrop-filter: blur(2px);
+}
+.ov__stats > div { display: flex; justify-content: space-between; gap: 6px; }
+.ov__stats dt { font-size: 9px; color: var(--muted); }
+.ov__stats dd { margin: 0; font-size: 10px; font-variant-numeric: tabular-nums; }
 
-.tile__faults { display: flex; gap: 5px; padding: 0 10px 10px; }
-.tile__faults button { padding: 3px 7px; font-size: 9.5px; }
+.ov__faults {
+  display: flex; gap: 5px; padding: 6px 8px;
+  background: color-mix(in srgb, var(--bg) 62%, transparent);
+}
+.ov__faults button { padding: 3px 7px; font-size: 9px; }
+
+/* ── resolve toast ──────────────────────────────────────────────────────── */
+.toast {
+  position: absolute; top: 8px; right: 8px; z-index: 4;
+  padding: 4px 9px; border-radius: 4px; font-size: 10px; letter-spacing: .04em;
+  color: var(--ok-ink); background: color-mix(in srgb, var(--bg) 84%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ok-ink) 55%, var(--rule));
+  backdrop-filter: blur(3px); pointer-events: none;
+  animation: toast-in 220ms ease-out;
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) { .toast { animation: none; } .ov { transition: none; } }
 
 /* ── incident log ───────────────────────────────────────────────────────── */
 .log {
@@ -181,3 +172,57 @@ button.on { background: var(--ink); color: var(--bg); border-color: var(--ink); 
 .log code { color: var(--ink); }
 
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+/* ── escalation ─────────────────────────────────────────────────────────── */
+.ov__report { margin-left: auto; color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, var(--rule)); }
+.ov__report:hover { background: var(--warn); color: var(--bg); border-color: var(--warn); }
+
+.controls select {
+  font-family: var(--mono); font-size: 11px; padding: 5px 8px; border-radius: 4px;
+  background: var(--panel); color: var(--ink); border: 1px solid var(--rule);
+}
+
+.modal {
+  position: fixed; inset: 0; z-index: 20; display: grid; place-items: center;
+  background: color-mix(in srgb, var(--bg) 72%, transparent); backdrop-filter: blur(2px);
+}
+.modal__panel {
+  width: min(520px, calc(100vw - 32px)); background: var(--panel);
+  border: 1px solid var(--rule); border-radius: 8px; padding: 18px;
+  display: flex; flex-direction: column; gap: 14px;
+}
+.modal__panel h2 { margin: 0; font-size: 13px; letter-spacing: .04em; font-weight: 600; }
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field > span {
+  font-size: 9.5px; letter-spacing: .16em; text-transform: uppercase; color: var(--muted);
+}
+.field select, .field textarea {
+  font-family: var(--mono); font-size: 12px; padding: 8px 9px; border-radius: 4px;
+  background: var(--panel-2); color: var(--ink); border: 1px solid var(--rule); resize: vertical;
+}
+
+.evidence {
+  margin: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 4px 14px;
+  padding: 10px; background: var(--panel-2); border: 1px solid var(--rule); border-radius: 4px;
+}
+.evidence > div { display: flex; justify-content: space-between; gap: 8px; }
+.evidence dt { font-size: 10px; color: var(--muted); }
+.evidence dd { margin: 0; font-size: 11px; font-variant-numeric: tabular-nums; }
+.evidence__src { grid-column: 1 / -1; }
+.evidence__src dd { font-size: 9.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%; }
+
+.modal__actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+.log h2 { display: flex; align-items: center; justify-content: space-between; }
+.log__copy { padding: 2px 7px; font-size: 9px; }
+.esc { list-style: none; margin: 0 0 20px; padding: 0; display: flex; flex-direction: column; gap: 9px; }
+.esc li {
+  display: grid; grid-template-columns: auto 1fr auto; gap: 3px 8px; font-size: 11px;
+  padding: 8px; border: 1px solid var(--rule); border-radius: 4px; background: var(--panel);
+}
+.esc__sev { font-size: 9px; letter-spacing: .1em; text-transform: uppercase; }
+.esc--high .esc__sev { color: var(--bad); }
+.esc--medium .esc__sev { color: var(--warn); }
+.esc--low .esc__sev { color: var(--muted); }
+.esc__note { grid-column: 1 / -1; color: var(--ink); }
+.esc__ev { grid-column: 1 / -1; color: var(--muted); font-size: 10px; }

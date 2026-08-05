@@ -25,27 +25,34 @@ const STATUS_COLOR: Record<Liveness, number> = {
   idle: 0x2a3542,
 };
 
-const VW = 160;              // virtual viewport units (16:9)
-const VH = 90;
-const HERO_H = VH * 0.72;    // focused feed
-const STRIP_H = VH * 0.20;   // carousel of everything else
+export const VW = 160;              // virtual viewport units (16:9)
+export const VH = 90;
+const STRIP_H = VH * 0.20;         // carousel of everything not promoted
 
 export interface WallStreamRef {
   id: string;
   el: HTMLVideoElement | null;
 }
 
-interface Box { x: number; y: number; w: number; h: number }
+export interface Box { x: number; y: number; w: number; h: number }
 
-/** Target geometry per tile. Grid, or hero-plus-carousel when one is focused. */
-function computeLayout(ids: string[], focusedId: string | null): Map<string, Box> {
+/**
+ * Target geometry per tile: a plain grid, or a hero band plus a carousel when
+ * one or more feeds are promoted.
+ *
+ * Heroes are a SET, not a single id — an alarm state can involve several
+ * cameras at once, and an operator handling a multi-camera incident should not
+ * have to click between them.
+ */
+export function computeLayout(ids: string[], heroIds: string[]): Map<string, Box> {
   const out = new Map<string, Box>();
-  const n = Math.max(1, ids.length);
+  const heroes = heroIds.filter((id) => ids.includes(id));
+  const gap = 1.2;
 
-  if (!focusedId || !ids.includes(focusedId)) {
+  if (heroes.length === 0) {
+    const n = Math.max(1, ids.length);
     const cols = Math.ceil(Math.sqrt(n));
     const rows = Math.ceil(n / cols);
-    const gap = 1.2;
     const cw = (VW - gap * (cols + 1)) / cols;
     const ch = (VH - gap * (rows + 1)) / rows;
     ids.forEach((id, i) => {
@@ -59,15 +66,30 @@ function computeLayout(ids: string[], focusedId: string | null): Map<string, Box
     return out;
   }
 
-  // Hero: fit 16:9 inside the hero band.
-  const heroH = HERO_H - 3;
-  const heroW = Math.min(VW - 6, heroH * (16 / 9));
-  out.set(focusedId, { x: VW / 2, y: VH - 2 - heroH / 2, w: heroW, h: heroH });
+  const others = ids.filter((id) => !heroes.includes(id));
+  const bandBottom = others.length ? STRIP_H + 1 : 2;
+  const bandTop = VH - 2;
+  const bandH = bandTop - bandBottom;
 
-  // Carousel: the rest, along the bottom.
-  const others = ids.filter((id) => id !== focusedId);
+  // Tile the heroes inside the band, each keeping 16:9.
+  const k = heroes.length;
+  const cols = Math.ceil(Math.sqrt(k));
+  const rows = Math.ceil(k / cols);
+  const cellW = (VW - 6 - gap * (cols - 1)) / cols;
+  const cellH = (bandH - gap * (rows - 1)) / rows;
+  const w = Math.min(cellW, cellH * (16 / 9));
+  const h = w / (16 / 9);
+  const gridW = cols * w + gap * (cols - 1);
+  const gridH = rows * h + gap * (rows - 1);
+  const originX = (VW - gridW) / 2 + w / 2;
+  const originY = bandTop - (bandH - gridH) / 2 - h / 2;
+
+  heroes.forEach((id, i) => {
+    const c = i % cols, r = Math.floor(i / cols);
+    out.set(id, { x: originX + c * (w + gap), y: originY - r * (h + gap), w, h });
+  });
+
   if (others.length) {
-    const gap = 1.2;
     let th = STRIP_H - 2;
     let tw = th * (16 / 9);
     const totalW = others.length * tw + gap * (others.length - 1);
@@ -87,14 +109,14 @@ function computeLayout(ids: string[], focusedId: string | null): Map<string, Box
 export function VideoWall({
   streams,
   statusById,
-  focusedId,
-  onFocus,
+  heroIds,
+  onToggleFocus,
   onFps,
 }: {
   streams: WallStreamRef[];
   statusById: Record<string, Liveness>;
-  focusedId: string | null;
-  onFocus: (id: string | null) => void;
+  heroIds: string[];
+  onToggleFocus: (id: string) => void;
   onFps: (fps: number) => void;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -108,15 +130,16 @@ export function VideoWall({
       lastUpload: number; target: Box; current: Box;
     }>;
     layout: Map<string, Box>;
-    focusedId: string | null;
+    heroIds: string[];
     uploadIntervalMs: number;
     raf?: number;
-  }>({ tiles: new Map(), layout: new Map(), focusedId: null, uploadIntervalMs: 0 });
+  }>({ tiles: new Map(), layout: new Map(), heroIds: [], uploadIntervalMs: 0 });
 
   const layoutKey = useMemo(
     () => streams.map((s) => `${s.id}:${s.el ? 1 : 0}`).join(','),
     [streams],
   );
+  const heroKey = heroIds.join(',');
 
   // ── renderer + animation loop ────────────────────────────────────────────
   useEffect(() => {
@@ -154,14 +177,14 @@ export function VideoWall({
         t.current.y += (t.target.y - t.current.y) * k;
         t.current.w += (t.target.w - t.current.w) * k;
         t.current.h += (t.target.h - t.current.h) * k;
-        t.group.position.set(t.current.x, t.current.y, id === s.focusedId ? 1 : 0);
+        t.group.position.set(t.current.x, t.current.y, s.heroIds.includes(id) ? 1 : 0);
         t.screen.scale.set(t.current.w, t.current.h, 1);
         t.frame.scale.set(t.current.w + 0.5, t.current.h + 0.5, 1);
 
         // Upload policy follows selection: focused feed every frame, the rest
         // rate-capped. This is the whole point of having a focused view.
         if (t.tex && t.el && t.el.readyState >= 2) {
-          const budget = id === s.focusedId ? 0 : s.uploadIntervalMs;
+          const budget = s.heroIds.includes(id) ? 0 : s.uploadIntervalMs;
           if (now - t.lastUpload >= budget) { t.tex.needsUpdate = true; t.lastUpload = now; }
         }
       }
@@ -182,7 +205,7 @@ export function VideoWall({
       const meshes = [...s.tiles.values()].map((t) => t.screen);
       const hit = ray.intersectObjects(meshes, false)[0];
       if (!hit) return;
-      for (const [id, t] of s.tiles) if (t.screen === hit.object) { onFocus(id === s.focusedId ? null : id); return; }
+      for (const [id, t] of s.tiles) if (t.screen === hit.object) { onToggleFocus(id); return; }
     };
     renderer.domElement.addEventListener('click', onClick);
 
@@ -201,7 +224,7 @@ export function VideoWall({
       host.removeChild(renderer.domElement);
       s.renderer = undefined; s.scene = undefined;
     };
-  }, [onFps, onFocus]);
+  }, [onFps, onToggleFocus]);
 
   // ── build meshes when the stream set changes ─────────────────────────────
   useEffect(() => {
@@ -216,7 +239,7 @@ export function VideoWall({
     s.renderer?.setPixelRatio(streams.length > 12 ? 1 : Math.min(window.devicePixelRatio, 2));
 
     const ids = streams.map((x) => x.id);
-    const layout = computeLayout(ids, s.focusedId);
+    const layout = computeLayout(ids, s.heroIds);
     s.layout = layout;
 
     streams.forEach((item) => {
@@ -262,14 +285,14 @@ export function VideoWall({
   // ── focus change: retarget boxes, let the loop animate ──────────────────
   useEffect(() => {
     const s = st.current;
-    s.focusedId = focusedId;
-    const layout = computeLayout(streams.map((x) => x.id), focusedId);
+    s.heroIds = heroIds;
+    const layout = computeLayout(streams.map((x) => x.id), heroIds);
     s.layout = layout;
     for (const [id, t] of s.tiles) {
       const box = layout.get(id);
       if (box) t.target = { ...box };
     }
-  }, [focusedId, layoutKey, streams]);
+  }, [heroKey, layoutKey, streams]);
 
   // ── status: recolour only ───────────────────────────────────────────────
   useEffect(() => {

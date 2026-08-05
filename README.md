@@ -2,110 +2,107 @@
 
 **A tile is only *live* if frames are advancing. Connection state is not liveness.**
 
-A multi-camera live-video wall that can tell a live feed from a dead one, and prove it — with a watchdog that runs off the main thread, real live HLS sources, and fault injection at the encoder rather than in the UI.
+A live-video wall that can tell a working feed from a dead one and prove it, built on real public HLS streams, composited on the GPU, with the watchdog running off the main thread.
 
 ---
 
 ## The problem
 
-In a live-video product the catastrophic failure isn't a crash. It's a tile that **looks** live and isn't: the element reports healthy, nothing throws, no error event fires — and the picture on screen is thirty seconds old. An operator trusts it. Nothing pages anyone, because nothing is broken; it's just absent.
+In a live-video product the catastrophic failure isn't a crash. It's a tile that **looks** live and isn't: the element reports healthy, nothing throws, no error event fires — and the picture is thirty seconds old. An operator trusts it. Nothing pages anyone, because nothing is broken; it's just absent.
 
-Most dashboards answer *"is it connected?"* That's a proxy. This answers *"are frames still arriving?"*, which is the actual question.
+Most dashboards answer *"is it connected?"* That's a proxy. This answers *"are frames still arriving, and is the content actually moving?"*
 
-## Demonstrated result
+## What it does
 
-Four live cameras. `scripts/cameras.sh freeze 1` sends **SIGSTOP to camera 1's encoder** — the camera genuinely stops producing segments. Measured 12 seconds later:
+- **Frame-aware liveness** per feed, with a `naive "is it connected?"` toggle so you can watch the connection check report a healthy feed that stopped ages ago.
+- **Auto-promote on signal loss.** Any feed that loses signal moves into the main area automatically; several can share it, because an incident can involve more than one camera. Recovery shows a **Signal restored** toast, holds for four seconds so it can be read, then shrinks back to the carousel.
+- **Click to focus**, ✕ or `Esc` to return. Selection drives real policy, not just layout (below).
+- **Report incident** — escalate a feed with the measurements attached automatically.
+- **Incident log** timestamping every transition in and out of signal loss.
 
-| | cam1 (encoder stopped) | cam2–4 (healthy) |
-|---|---|---|
-| Frame-aware watchdog | **`stale 28.2s`** | `live` |
-| Naive connection check | **`connected`** | `connected` |
-| `video.currentTime` | 182.96 — **30s behind** | 213.9 |
-| `video.error` | `null` | `null` |
-| media-clock drift | 1.00 | 1.00 |
+## How liveness is measured
 
-The connection check reports a healthy feed thirty seconds after the camera stopped sending.
+**Decoded frames, not presented frames.** The obvious approach is `requestVideoFrameCallback`, and it's wrong here: rVFC fires on frame *presentation*, and these decoders are offscreen — the wall is drawn from their textures, not from the elements. Every feed reported dead. `getVideoPlaybackQuality().totalVideoFrames` counts decoded frames regardless of presentation, so that's the heartbeat. The cost is exact per-frame timestamps, so the stat shown is decode interval, labelled as such.
 
-## How it works
+**The watchdog owns its clock, in a Worker.** A liveness check on the main thread is a victim of the jank it's meant to detect: while the thread is blocked its timer doesn't fire either, and silence reads as health. Hit **inject main-thread jank** to see the difference.
 
-**Liveness is measured, not assumed.** `requestVideoFrameCallback` gives per-presented-frame metadata. Each frame emits a heartbeat; a tile is `live` only while heartbeats keep arriving.
+**Frame arrival alone is not enough.** When a live source dies, hls.js enters a reload loop — it retries the stalled playlist, each attempt decodes a frame or two, and `currentTime` resets each cycle. Frames keep arriving, so an arrival-only watchdog sits at "degraded" forever and never calls it, while the operator is shown the same few seconds on repeat. Observed directly: a feed dead for two minutes still producing frames every ~1.1s.
 
-**The watchdog owns its own clock, in a Worker.** This is the part that matters. A liveness check on the main thread is a victim of the very jank it's meant to detect — while the thread is blocked, its timer doesn't fire either, so silence gets read as health. The worker's timer keeps running regardless. Hit **inject main-thread jank** and watch the difference.
+So liveness also requires **windowed media drift** — how far the media clock moves per second of wall clock, over the last six seconds. ~1.00 healthy; a reload loop replays the same window and collapses toward 0. A feed with frames arriving and drift below 0.35 is called stale, because to the operator it is.
 
-**Media-clock drift** compares media time against wall clock. Healthy ≈ 1.00; a frozen feed trends to 0. It catches the case where a feed stalls without ever firing an error.
+## Escalation
 
-**Faults are real, never cosmetic:**
+**Report incident** on a promoted feed opens a form with severity and a note — and attaches the evidence captured at that moment: liveness, how long it's been stale, media drift, decoded and dropped counts, and the source URL. Escalations are listed in the sidebar and copy out as JSON.
+
+The point is that the person receiving it gets numbers rather than "camera 3 looks funny". That's the difference between a ticket someone can action and one that starts with a round of questions.
+
+## Sources: real public live streams, and what it took to find them
+
+No local encoder rig, nothing synthetic:
+
+| | |
+|---|---|
+| `LIVE-A` | `demo.unified-streaming.com/k8s/live/stable/live.isml/.m3u8` |
+| `LIVE-B` | `demo.unified-streaming.com/k8s/live/stable/scte35.isml/.m3u8` |
+
+Both are genuinely live (media sequence advances), serve CORS on playlist **and** segments, are multi-variant (500k / 1000k at 1280x720), and burn a wall clock into the picture — so a stale tile is visible to the eye, not only to the instrumentation.
+
+Getting to two working sources meant rejecting most of the field:
+
+| Candidate | Why |
+|---|---|
+| `test-streams.mux.dev`, `mux-pts-shift` | **VOD.** hls.js buffers a VOD asset end-to-end — `buffered` came back `[10, 300]`, 208s ahead — so it cannot be starved and no live-edge behaviour occurs. An earlier version of this project was built on one of these, which meant demoing a live product on video-on-demand. |
+| Apple `bipbop` | No `Access-Control-Allow-Origin` header at all. |
+| Akamai `cph-p2p-msl`, `moctobpltc` | Masters resolve; their advertised variant playlists **404**. |
+| Bitmovin, AWS `skip_armstrong` | 403. |
+| Al Jazeera, Amagi/ABC | Connection failure / 500. |
+
+Public demo endpoints rot. Verified 2026-08-05.
+
+**What using public feeds costs.** An earlier version generated local HLS with ffmpeg, which allowed killing a camera at the *encoder* with `SIGSTOP` — the most honest possible "the camera died". You can't do that to someone else's stream, so `freeze` is now client-side `hls.stopLoad()`: the small live buffer starves in seconds, then hls.js drops into its reload loop. That exercises the *harder* detection path rather than the easy one.
+
+## Focus view — not just layout
+
+Selection drives budget, not presentation. An operator scans the wall and studies one feed, so the rest needn't cost full rate:
+
+- the focused feed uploads its texture **every frame**; carousel tiles are rate-capped
+- the focused feed requests full quality (`hls.currentLevel = -1`); the rest pin to the lowest rendition — and these sources genuinely have two renditions, so it bites
+
+## Faults are real, never cosmetic
 
 | Fault | What actually happens |
 |---|---|
-| `cameras.sh freeze N` | SIGSTOP the encoder — the camera stops sending. The truest failure in the set. |
-| `freeze` (per-tile) | `hls.stopLoad()` — client stops fetching; with a 3s live buffer it starves in seconds. |
+| `freeze` | `hls.stopLoad()`. The live buffer starves within seconds, then a reload loop. |
 | `jank` | A genuine main-thread busy-loop. Real long tasks, real dropped frames. |
 | `low-q` | Pins hls.js to its lowest rendition — real bitrate degradation. |
-
-## Focus view — and why it's not just layout
-
-Click any feed to promote it to a hero view; the rest ease down into a carousel along the bottom. **✕** or **Esc** returns to the grid. Works in both compositors — in GPU mode the click is a raycast into the scene and the transition is position/scale easing in the render loop, not CSS.
-
-The reason a wall has a focused view isn't presentation, it's budget. An operator scans the wall and studies exactly one feed, so the other tiles don't need to cost full rate or full bitrate. Selection therefore drives policy:
-
-- the focused feed uploads its texture **every frame**; strip tiles stay rate-capped
-- the focused feed requests full quality (`hls.currentLevel = -1`); the rest are pinned to the lowest rendition
-
-That second one is wired and correct but **has nothing to bite on here** — the bundled ffmpeg cameras emit a single rendition. Point it at a multi-variant source to see it work. Flagging that rather than letting the code imply a benefit it can't currently demonstrate.
-
-## Sources are genuinely live — and that mattered
-
-`scripts/cameras.sh` generates local live HLS with ffmpeg: 1s segments, a 4-segment sliding window, no `EXT-X-ENDLIST`, and a **wall-clock timecode burned into the picture** so a stale tile is visible to the eye, not only to the instrumentation.
-
-This started out pointed at the usual public "test streams." Those are **VOD**. hls.js buffers a VOD asset end-to-end — `buffered` came back as `[10, 300]`, 208 seconds ahead — so `stopLoad()` did nothing, the player never starved, and none of the live-edge behaviour this project is about could occur. It was a demo of the wrong thing. Generating real live sources fixed it and made the repo self-contained.
 
 ## Running it
 
 ```bash
-bun install          # or npm install
-./scripts/cameras.sh start 4
-bun run dev          # http://localhost:5183
+bun install     # or npm install
+bun run dev     # http://localhost:5183
 ```
 
-```bash
-./scripts/cameras.sh freeze 2   # kill camera 2 at the encoder
-./scripts/cameras.sh thaw 2
-./scripts/cameras.sh status
-./scripts/cameras.sh stop
-```
+No other setup — the feeds are public. Start with 1–2 feeds; each additional 720p stream is a full decoder, and that is the real ceiling (see below).
 
-Requires `ffmpeg` (`brew install ffmpeg`).
+## Two bugs worth recording
 
-## The GPU compositor — and a benchmark I had to throw away
+**A benchmark I threw away.** The first GPU-vs-DOM A/B looked decisive — GPU 60fps vs DOM 32fps at 4 feeds, GPU collapsing to 5.5fps at 24 — and I'd written a confident explanation about texture-upload bandwidth. Then two bugs surfaced: the scene was being rebuilt ~10×/second (status and stream identity shared one prop, so the layout effect tore down every mesh on each watchdog tick), and **the tiles were black the whole time** — plain `THREE.Texture` doesn't take three.js's video upload path, so no uploads were happening at all. I had measured the cost of uploading nothing and explained it with a theory about the cost of uploading. Both fixed; the numbers were deleted rather than corrected, because a measurement of the wrong thing doesn't become right when you adjust it.
 
-Toggle **compositor: GPU (three.js)** to render the wall as textured quads in one WebGL surface instead of N browser-composited `<video>` layers. The premise: past a dozen or so tiles, each `<video>` is a separately composited layer the browser must lay out, paint and blend every frame.
+**Every staleness figure was silently offset.** The worker compared its own `performance.now()` against timestamps taken on the main thread — and a Worker has its **own time origin**. Detection still fired, because the value grows without bound once frames stop, so it crossed the threshold anyway. But every number displayed was wrong by a constant. It surfaced as a negative reading: `stale for -2.6s`. Both sides now use `Date.now()`.
 
-**There are currently no trustworthy numbers for this, and the ones I collected first were worthless.** Recording that here because it's the more useful engineering content.
-
-The first A/B looked decisive — GPU 60fps vs DOM 32fps at 4 feeds, GPU collapsing to 5.5fps at 24 — and I wrote up a confident explanation about texture-upload bandwidth being the ceiling. Then two bugs surfaced:
-
-1. **The scene was being rebuilt ~10×/second.** Status and stream identity were folded into one prop, so the layout effect saw a new identity on every watchdog tick and tore down every mesh, material and texture. I was benchmarking teardown thrash.
-2. **The tiles were black the whole time.** Plain `THREE.Texture` doesn't take three.js's video upload path, so *no texture uploads were happening at all*. I had measured the cost of uploading nothing, and explained the result with a theory about upload bandwidth.
-
-Both are fixed — layout keyed on the stream set only, `VideoTexture` for the correct upload path with its per-render auto-invalidation neutered so the render loop owns the rate cap (0ms ≤8 feeds, 100ms ≤24, 200ms beyond; 1× pixel ratio past 12 tiles). The wall now genuinely paints. **The old numbers are deleted rather than corrected, because a measurement of the wrong thing doesn't become right when you adjust it.**
-
-Re-measuring properly needs a machine that isn't simultaneously running four encoders, a dev server and a browser decoding dozens of streams — by the end, DOM's own 24-feed figure had drifted from 30fps to 8.9fps between runs.
-
-The lesson worth keeping is the one that cost the most: **a plausible explanation for a number is not evidence the number means anything.** I had a tidy story about zero-copy overlay planes ready before I checked whether a single pixel was being uploaded.
+Both are the same shape as the failure this project is about: something that reports a plausible number while measuring the wrong thing.
 
 ## Honest limitations
 
-**Frame-timing numbers must be gathered on a real display.** Verifying this in headless Chromium, `requestAnimationFrame` itself ran at a **1015ms median** — the compositor is throttled to ~1Hz with no vsync, so rVFC faithfully reports presentation that simply isn't happening at video rate. The instrumentation is correct; the environment is degenerate. Interval percentiles collected headlessly are meaningless. Decode counts, dropped frames, and drift are unaffected, which is why the liveness result above is trustworthy.
+**No compositor performance numbers are quoted anywhere.** See above. Re-measuring needs a quiet machine; on the development laptop, DOM's own 24-feed figure drifted from 30fps to 8.9fps between runs.
 
-**The naive check modelled here is a realistic weak one**, not a straw man — `readyState >= 2 && !paused && !error`, which is a very common shipped pattern. Be precise about what it does and doesn't miss: in the SIGSTOP run above `readyState` fell to 2, so a stricter `readyState >= 3` check *would* have caught that particular stall. The failure that defeats **every** readyState-based check is a frozen picture with an advancing clock — an encoder repeating its last frame, or a CDN serving a stale segment on loop. That's why frame advancement and media drift are the right signals rather than a better readyState threshold.
+**Decode is the ceiling, and it's low.** Four concurrent 720p decodes saturated the dev machine — ~48 frames decoded in 18s with 16.9s of blocking time, and the watchdog correctly called every feed stale because frames genuinely weren't arriving. The production answer is a low-resolution sub-stream for wall tiles; the policy is wired, the sources only offer two renditions.
 
-**Benchmarks need a quiet machine.** Everything ran on a laptop simultaneously hosting the encoders, the dev server and the browser. Numbers drifted badly between runs once the wall got large. There are deliberately no compositor performance figures quoted anywhere in this repo — see the section above for why.
+**The naive check modelled here is a realistic weak one**, not a straw man — `readyState >= 2 && !paused && !error`, a common shipped pattern. A stricter `readyState >= 3` would catch a plain buffer underrun. What defeats *every* readyState-based check is a frozen picture with an advancing clock, which is why frame advancement and media drift are the signals rather than a better threshold.
 
-**Not yet built:** pixel-level frozen-frame detection (hash consecutive downsampled frames to catch the advancing-clock case above); low-resolution sub-streams for wall tiles with full resolution on the focused feed — the fix the compositor findings point at; culling off-screen tiles.
+**Not built:** pixel-level frozen-frame detection (hash consecutive downsampled frames) for the advancing-clock case; culling off-screen tiles; hysteresis on auto-promote, which currently re-promotes a flapping feed on every transition.
 
 ## Stack
 
-React 19 · TypeScript · Vite · three.js · hls.js · Web Workers · ffmpeg
-
-No dependencies beyond hls.js and React. The watchdog, metrics, and fault injection are all first-party.
+React 19 · TypeScript · Vite · three.js · hls.js · Web Workers

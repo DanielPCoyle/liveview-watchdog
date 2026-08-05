@@ -12,18 +12,36 @@
  */
 import type { ToWorker, FromWorker, Liveness } from './types';
 
+interface Sample { at: number; media: number }
+
 interface Entry {
   staleAfterMs: number;
   degradedAfterMs: number;
   lastFrameAt: number | null;
-  firstFrameAt: number | null;
-  lastMediaTime: number | null;
-  firstMediaTime: number | null;
+  samples: Sample[];
   idle: boolean;
 }
 
 const entries = new Map<string, Entry>();
 const TICK_MS = 100;
+
+/**
+ * Drift is measured over a sliding window, not since the first frame ever.
+ *
+ * Frame arrival alone is not sufficient evidence of liveness. When a live
+ * source dies, hls.js enters a reload loop: it retries the stalled playlist,
+ * each attempt presents a frame or two, and `currentTime` resets to 0 each
+ * cycle. Frames keep arriving — so a purely arrival-based watchdog sits at
+ * "degraded" forever and never calls it — while the operator is shown the same
+ * few seconds on repeat. Observed directly: a camera dead for two minutes still
+ * reported frames every ~1.1s.
+ *
+ * Media time advancing in step with wall time is the signal that survives that.
+ * A reload loop replays the same window, so windowed drift collapses toward 0.
+ */
+const DRIFT_WINDOW_MS = 6000;
+const DRIFT_MIN_SPAN_MS = 2500;
+const DRIFT_STALE_BELOW = 0.35;
 
 self.onmessage = (e: MessageEvent<ToWorker>) => {
   const msg = e.data;
@@ -33,9 +51,7 @@ self.onmessage = (e: MessageEvent<ToWorker>) => {
         staleAfterMs: msg.staleAfterMs,
         degradedAfterMs: msg.degradedAfterMs,
         lastFrameAt: null,
-        firstFrameAt: null,
-        lastMediaTime: null,
-        firstMediaTime: null,
+        samples: [],
         idle: true,
       });
       break;
@@ -44,7 +60,7 @@ self.onmessage = (e: MessageEvent<ToWorker>) => {
       break;
     case 'idle': {
       const en = entries.get(msg.id);
-      if (en) { en.idle = true; en.lastFrameAt = null; en.firstFrameAt = null; }
+      if (en) { en.idle = true; en.lastFrameAt = null; en.samples = []; }
       break;
     }
     case 'frame': {
@@ -52,36 +68,47 @@ self.onmessage = (e: MessageEvent<ToWorker>) => {
       if (!en) break;
       en.idle = false;
       en.lastFrameAt = msg.at;
-      en.lastMediaTime = msg.mediaTime;
-      if (en.firstFrameAt == null) { en.firstFrameAt = msg.at; en.firstMediaTime = msg.mediaTime; }
+      en.samples.push({ at: msg.at, media: msg.mediaTime });
+      const cutoff = msg.at - DRIFT_WINDOW_MS;
+      while (en.samples.length > 2 && en.samples[0].at < cutoff) en.samples.shift();
       break;
     }
   }
 };
 
 setInterval(() => {
-  const now = performance.now();
+  // Must match the main thread's clock — see the note in useTile.
+  const now = Date.now();
   const out: FromWorker['entries'] = [];
 
   for (const [id, en] of entries) {
     let liveness: Liveness;
     let staleMs = 0;
 
+    // Windowed media drift: how far the media clock moved per second of wall
+    // clock, recently. ~1.0 healthy, ~0 for a feed that is not progressing.
+    let drift: number | null = null;
+    if (en.samples.length >= 2) {
+      const first = en.samples[0];
+      const last = en.samples[en.samples.length - 1];
+      const wall = last.at - first.at;
+      if (wall >= DRIFT_MIN_SPAN_MS) drift = ((last.media - first.media) * 1000) / wall;
+    }
+
     if (en.idle || en.lastFrameAt == null) {
       liveness = 'idle';
     } else {
       staleMs = now - en.lastFrameAt;
-      liveness = staleMs >= en.staleAfterMs ? 'stale'
-        : staleMs >= en.degradedAfterMs ? 'degraded'
-        : 'live';
-    }
-
-    // Media clock vs wall clock. A frozen feed keeps its last frame on screen
-    // and reports readyState 4 with no error — but its media time stops moving.
-    let drift: number | null = null;
-    if (en.firstFrameAt != null && en.lastFrameAt != null && en.firstMediaTime != null && en.lastMediaTime != null) {
-      const wall = en.lastFrameAt - en.firstFrameAt;
-      if (wall > 500) drift = ((en.lastMediaTime - en.firstMediaTime) * 1000) / wall;
+      if (staleMs >= en.staleAfterMs) {
+        liveness = 'stale';                       // frames stopped outright
+      } else if (drift != null && drift < DRIFT_STALE_BELOW) {
+        // Frames ARE arriving, but the content isn't moving — a player looping
+        // on a dead source. Treated as signal loss, because to the operator it
+        // is: what's on screen is not now.
+        liveness = 'stale';
+      } else {
+        liveness = staleMs >= en.degradedAfterMs ? 'degraded' : 'live';
+      }
     }
 
     out.push([id, liveness, Math.round(staleMs), drift == null ? null : +drift.toFixed(3)]);

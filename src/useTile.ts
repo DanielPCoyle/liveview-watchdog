@@ -31,7 +31,6 @@ export function useTile({ id, src, fault, focused = false, onFrame, onIdle }: Us
   const intervalsRef = useRef<number[]>([]);
   const lastNowRef = useRef<number | null>(null);
   const observedRef = useRef(0);
-  const rafHandleRef = useRef<number | null>(null);
 
   const [naive, setNaive] = useState<NaiveState>('idle');
   const [stats, setStats] = useState<Pick<TileStats, 'observedFrames' | 'totalFrames' | 'droppedFrames' | 'droppedPct' | 'p50IntervalMs' | 'p95IntervalMs'>>({
@@ -77,25 +76,43 @@ export function useTile({ id, src, fault, focused = false, onFrame, onIdle }: Us
     const naiveTimer = window.setInterval(refreshNaive, 500);
 
     // ── frame observation ──────────────────────────────────────────────────
-    const onVideoFrame: VideoFrameRequestCallback = (now, meta) => {
+    //
+    // Deliberately NOT requestVideoFrameCallback. rVFC fires on frame
+    // PRESENTATION, and these decoders are offscreen — the wall is drawn from
+    // their textures, not from the elements themselves — so rVFC never fires
+    // and every feed would look dead. (Observed: all four feeds reporting
+    // "stale" while decoding normally.)
+    //
+    // getVideoPlaybackQuality().totalVideoFrames counts DECODED frames and is
+    // unaffected by whether anything is presented. Poll it, and treat an
+    // increase as evidence frames are arriving. That costs exact per-frame
+    // timestamps — so the stat below is decode rate, not presentation interval,
+    // and is labelled as such.
+    let lastTotal = -1;
+    const poll = () => {
       if (disposed) return;
-      observedRef.current += 1;
-
-      if (lastNowRef.current != null) {
-        const dt = now - lastNowRef.current;
-        const arr = intervalsRef.current;
-        arr.push(dt);
-        if (arr.length > MAX_INTERVALS) arr.shift();
+      const q = typeof v.getVideoPlaybackQuality === 'function' ? v.getVideoPlaybackQuality() : null;
+      const total = q?.totalVideoFrames ?? 0;
+      if (lastTotal >= 0 && total > lastTotal) {
+        // Date.now(), not performance.now(): this timestamp is compared inside
+        // a Worker, and a Worker has its OWN performance time origin. Comparing
+        // across the boundary silently offsets every staleness reading by a
+        // constant (it surfaced as a negative "stale for -2.6s"). Wall clock is
+        // lower resolution but is the same clock on both sides.
+        const now = Date.now();
+        observedRef.current += total - lastTotal;
+        if (lastNowRef.current != null) {
+          const perFrame = (now - lastNowRef.current) / (total - lastTotal);
+          const arr = intervalsRef.current;
+          arr.push(perFrame);
+          if (arr.length > MAX_INTERVALS) arr.shift();
+        }
+        lastNowRef.current = now;
+        onFrame(id, now, v.currentTime);
       }
-      lastNowRef.current = now;
-
-      onFrame(id, performance.now(), meta.mediaTime);
-      rafHandleRef.current = v.requestVideoFrameCallback(onVideoFrame);
+      lastTotal = total;
     };
-
-    if ('requestVideoFrameCallback' in v) {
-      rafHandleRef.current = v.requestVideoFrameCallback(onVideoFrame);
-    }
+    const pollTimer = window.setInterval(poll, 100);
 
     const statsTimer = window.setInterval(() => {
       if (disposed) return;
@@ -117,10 +134,8 @@ export function useTile({ id, src, fault, focused = false, onFrame, onIdle }: Us
       disposed = true;
       window.clearInterval(naiveTimer);
       window.clearInterval(statsTimer);
+      window.clearInterval(pollTimer);
       evts.forEach((ev) => v.removeEventListener(ev, refreshNaive));
-      if (rafHandleRef.current != null && 'cancelVideoFrameCallback' in v) {
-        v.cancelVideoFrameCallback(rafHandleRef.current);
-      }
       hlsRef.current?.destroy();
       hlsRef.current = null;
       onIdle(id);
