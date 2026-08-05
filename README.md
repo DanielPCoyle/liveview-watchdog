@@ -14,7 +14,7 @@ Most dashboards answer *"is it connected?"* That's a proxy. This answers *"are f
 
 ## What it does
 
-- **Frame-aware liveness** per feed, with a `naive "is it connected?"` toggle so you can watch the connection check report a healthy feed that stopped ages ago.
+- **Frame-aware liveness** per feed — the pill reports whether frames are still advancing, not whether the element claims to be connected.
 - **Auto-promote on signal loss.** Any feed that loses signal moves into the main area automatically; several can share it, because an incident can involve more than one camera. Recovery shows a **Signal restored** toast, holds for four seconds so it can be read, then shrinks back to the carousel.
 - **Click to focus**, ✕ or `Esc` to return. Selection drives real policy, not just layout (below).
 - **Feed registry on the grid.** Feeds are registered, not hard-coded — an empty slot sits in the wall where the next feed will go, and each tile carries its own remove control. Groups live behind **manage groups**; only the active group is mounted, because decode is the ceiling. Registering offers a **catalogue of verified feeds** in a searchable dropdown — including one deliberately-broken entry (Apple bipbop, which is VOD) so you can see a rejection — and still accepts any pasted `.m3u8`. Either way the URL is probed (live / VOD / CORS) before it reaches the wall.
@@ -29,7 +29,7 @@ Most dashboards answer *"is it connected?"* That's a proxy. This answers *"are f
 
 **Decoded frames, not presented frames.** The obvious approach is `requestVideoFrameCallback`, and it's wrong here: rVFC fires on frame *presentation*, and these decoders are offscreen — the wall is drawn from their textures, not from the elements. Every feed reported dead. `getVideoPlaybackQuality().totalVideoFrames` counts decoded frames regardless of presentation, so that's the heartbeat. The cost is exact per-frame timestamps, so the stat shown is decode interval, labelled as such.
 
-**The watchdog owns its clock, in a Worker.** A liveness check on the main thread is a victim of the jank it's meant to detect: while the thread is blocked its timer doesn't fire either, and silence reads as health. Hit **inject main-thread jank** to see the difference.
+**The watchdog owns its clock, in a Worker.** A liveness check on the main thread is a victim of the jank it's meant to detect: while the thread is blocked its timer doesn't fire either, and silence reads as health. The `long tasks` and `blocking` counters in the header are the main thread's own report card, measured with `PerformanceObserver` while the watchdog keeps its own time.
 
 **Frame arrival alone is not enough.** When a live source dies, hls.js enters a reload loop — it retries the stalled playlist, each attempt decodes a frame or two, and `currentTime` resets each cycle. Frames keep arriving, so an arrival-only watchdog sits at "degraded" forever and never calls it, while the operator is shown the same few seconds on repeat. Observed directly: a feed dead for two minutes still producing frames every ~1.1s.
 
@@ -108,8 +108,9 @@ Selection drives budget, not presentation. An operator scans the wall and studie
 | Fault | What actually happens |
 |---|---|
 | `freeze` | `hls.stopLoad()`. The live buffer starves within seconds, then a reload loop. |
-| `jank` | A genuine main-thread busy-loop. Real long tasks, real dropped frames. |
 | `low-q` | Pins hls.js to its lowest rendition — real bitrate degradation. |
+
+Available on a promoted tile, and on every row in list mode.
 
 ## Running it
 
@@ -134,7 +135,7 @@ Both are the same shape as the failure this project is about: something that rep
 
 **Decode is the ceiling, and it's low.** Four concurrent 720p decodes saturated the dev machine — ~48 frames decoded in 18s with 16.9s of blocking time, and the watchdog correctly called every feed stale because frames genuinely weren't arriving. The production answer is a low-resolution sub-stream for wall tiles; the policy is wired, the sources only offer two renditions.
 
-**The naive check modelled here is a realistic weak one**, not a straw man — `readyState >= 2 && !paused && !error`, a common shipped pattern. A stricter `readyState >= 3` would catch a plain buffer underrun. What defeats *every* readyState-based check is a frozen picture with an advancing clock, which is why frame advancement and media drift are the signals rather than a better threshold.
+**The check this replaces is a realistic weak one**, not a straw man — `readyState >= 2 && !paused && !error`, a common shipped pattern. A stricter `readyState >= 3` would catch a plain buffer underrun. What defeats *every* readyState-based check is a frozen picture with an advancing clock, which is why frame advancement and media drift are the signals rather than a better threshold. `useTile` still computes that naive verdict alongside the real one; the side-by-side toggle that used to surface it has been taken off the control bar.
 
 **Hysteresis, and why it exists.** A state must hold for 12 consecutive worker ticks before it counts as an event. Without it a feed under load flaps — the machine stalls a decode, the watchdog correctly calls it stale, it recovers, and the cycle repeats, producing a dozen lost/restored pairs in twenty seconds. Every individual reading was true and the sequence was still useless. Measured after: 0 incidents in 50s under 21s of blocking time, while a genuine freeze still produced exactly one lost/restored pair. The pill shows raw state immediately; only *events* require confirmation.
 

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import CreatableSelect from 'react-select/creatable';
 import { useTile } from './useTile';
-import { useLongTasks, useJankInjector } from './perf';
+import { useLongTasks } from './perf';
 import { VideoWall, computeLayout, emphasize, VW, VH, type Box, type WallStreamRef } from './VideoWall';
 import type { Fault, FromWorker, Liveness, ToWorker } from './types';
 import {
@@ -111,7 +111,7 @@ function Stream(props: {
   box: Box | undefined; isHero: boolean; resolved: boolean;
   /** Pointed at from the roster — this tile is swollen and must be in front. */
   isHovered: boolean;
-  status: WorkerStatus | undefined; showNaive: boolean; audible: boolean;
+  status: WorkerStatus | undefined; audible: boolean;
   onToggleAudio: (id: string) => void;
   onFrame: (id: string, at: number, mediaTime: number) => void;
   onIdle: (id: string) => void;
@@ -128,7 +128,7 @@ function Stream(props: {
   reportNonce: number;
   faultable: boolean;
 }) {
-  const { attachRef, naive, stats } = useTile({
+  const { attachRef, stats } = useTile({
     id: props.id, src: props.src, fault: props.fault, focused: props.isHero,
     audible: props.audible, onFrame: props.onFrame, onIdle: props.onIdle,
   });
@@ -137,7 +137,6 @@ function Stream(props: {
 
   const st = props.status;
   const liveness = st?.liveness ?? 'idle';
-  const shown = props.showNaive ? naive : liveness;
 
   // Snapshot the evidence at the moment of reporting, from the component that
   // actually owns the decoder.
@@ -163,7 +162,7 @@ function Stream(props: {
           attachment and leaves a dead readyState-0 element behind. */}
       <video className="decoder" ref={videoRef} muted playsInline />
       {props.box && (
-        <div className={`ov ov--${shown} ${props.isHero ? 'ov--hero' : ''} ${props.isHovered ? 'ov--front' : ''}`} style={pct(props.box)}
+        <div className={`ov ov--${liveness} ${props.isHero ? 'ov--hero' : ''} ${props.isHovered ? 'ov--front' : ''}`} style={pct(props.box)}
           onClick={() => props.onToggleFocus(props.id)}
           role="button" tabIndex={0}
           onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); props.onToggleFocus(props.id); } }}
@@ -181,13 +180,13 @@ function Stream(props: {
             <button className="ov__remove" title={`Remove ${props.label}`}
               aria-label={`Remove ${props.label}`}
               onClick={(e) => { e.stopPropagation(); props.onRemove(props.id); }}>×</button>
-            <span className={`pill pill--${shown}`}>
-              {shown}
-              {!props.showNaive && liveness !== 'idle' && liveness !== 'live' ? ` ${(st!.staleMs / 1000).toFixed(1)}s` : ''}
+            <span className={`pill pill--${liveness}`}>
+              {liveness}
+              {liveness !== 'idle' && liveness !== 'live' ? ` ${(st!.staleMs / 1000).toFixed(1)}s` : ''}
             </span>
           </div>
 
-          {props.isHero && !props.showNaive && (
+          {props.isHero && (
             <dl className="ov__stats">
               <div><dt>decode interval</dt><dd>{stats.p50IntervalMs ?? '–'} ms</dd></div>
               <div><dt>decoded</dt><dd>{stats.totalFrames}</dd></div>
@@ -886,8 +885,6 @@ export default function App() {
   const [audible, setAudible] = useState<Record<string, boolean>>({});
   const [faults, setFaults] = useState<Record<string, Fault>>({});
   const [statuses, setStatuses] = useState<Record<string, WorkerStatus>>({});
-  const [jank, setJank] = useState(false);
-  const [showNaive, setShowNaive] = useState(false);
   const [wallFps, setWallFps] = useState(0);
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [clock, setClock] = useState(() => new Date().toLocaleTimeString());
@@ -917,7 +914,6 @@ export default function App() {
   const elsRef = useRef<Record<string, HTMLVideoElement | null>>({});
   const prevLiveness = useRef<Record<string, Liveness>>({});
   const perf = useLongTasks();
-  useJankInjector(jank);
 
   useEffect(() => {
     const t = window.setInterval(() => setClock(new Date().toLocaleTimeString()), 1000);
@@ -1254,12 +1250,6 @@ export default function App() {
           title="Promote any feed that loses signal into the main area automatically">
           auto-promote on signal loss: {autoPromote ? 'on' : 'off'}
         </button>
-        <button className={jank ? 'on' : ''} onClick={() => setJank((v) => !v)}>
-          {jank ? 'stop main-thread jank' : 'inject main-thread jank'}
-        </button>
-        <button className={showNaive ? 'on' : ''} onClick={() => setShowNaive((v) => !v)}>
-          {showNaive ? 'showing: naive "is it connected?"' : 'showing: frame-aware watchdog'}
-        </button>
         {heroIds.length > 0 && <button onClick={clearFocus}>✕ back to wall (Esc)</button>}
       </section>
 
@@ -1293,7 +1283,7 @@ export default function App() {
                 fault={faults[t.id] ?? 'none'} box={listMode ? undefined : layout.get(t.id)}
                 isHero={heroIds.includes(t.id)} resolved={!!resolving[t.id]}
                 isHovered={hoverId === t.id}
-                status={statuses[t.id]} showNaive={showNaive}
+                status={statuses[t.id]}
                 onFrame={onFrame} onIdle={onIdle} onEl={onEl}
                 onFaultChange={onFaultChange} onToggleFocus={onToggleFocus}
                 onReport={onReport} faultable={t.faultable}
