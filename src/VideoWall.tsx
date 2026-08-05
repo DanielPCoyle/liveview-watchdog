@@ -110,12 +110,20 @@ export function VideoWall({
   streams,
   statusById,
   heroIds,
+  layout,
   onToggleFocus,
   onFps,
 }: {
   streams: WallStreamRef[];
   statusById: Record<string, Liveness>;
   heroIds: string[];
+  /**
+   * Layout is computed by the caller and passed in, not derived here. The wall
+   * is no longer the only thing on the grid — there is an empty "add feed"
+   * slot too — so a single source of truth beats two implementations that have
+   * to agree.
+   */
+  layout: Map<string, Box>;
   onToggleFocus: (id: string) => void;
   onFps: (fps: number) => void;
 }) {
@@ -140,6 +148,7 @@ export function VideoWall({
     [streams],
   );
   const heroKey = heroIds.join(',');
+  const layoutKeyIds = [...layout.keys()].join(',');
 
   // ── renderer + animation loop ────────────────────────────────────────────
   useEffect(() => {
@@ -238,8 +247,6 @@ export function VideoWall({
     s.uploadIntervalMs = streams.length <= 8 ? 0 : streams.length <= 24 ? 100 : 200;
     s.renderer?.setPixelRatio(streams.length > 12 ? 1 : Math.min(window.devicePixelRatio, 2));
 
-    const ids = streams.map((x) => x.id);
-    const layout = computeLayout(ids, s.heroIds);
     s.layout = layout;
 
     streams.forEach((item) => {
@@ -286,13 +293,12 @@ export function VideoWall({
   useEffect(() => {
     const s = st.current;
     s.heroIds = heroIds;
-    const layout = computeLayout(streams.map((x) => x.id), heroIds);
     s.layout = layout;
     for (const [id, t] of s.tiles) {
       const box = layout.get(id);
       if (box) t.target = { ...box };
     }
-  }, [heroKey, layoutKey, streams]);
+  }, [heroKey, layoutKey, layoutKeyIds, layout, heroIds]);
 
   // ── status: recolour only ───────────────────────────────────────────────
   useEffect(() => {

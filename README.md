@@ -17,6 +17,8 @@ Most dashboards answer *"is it connected?"* That's a proxy. This answers *"are f
 - **Frame-aware liveness** per feed, with a `naive "is it connected?"` toggle so you can watch the connection check report a healthy feed that stopped ages ago.
 - **Auto-promote on signal loss.** Any feed that loses signal moves into the main area automatically; several can share it, because an incident can involve more than one camera. Recovery shows a **Signal restored** toast, holds for four seconds so it can be read, then shrinks back to the carousel.
 - **Click to focus**, ✕ or `Esc` to return. Selection drives real policy, not just layout (below).
+- **Feed registry on the grid.** Feeds are registered, not hard-coded — an empty slot sits in the wall where the next feed will go, and each tile carries its own remove control. Groups live behind **manage groups**; only the active group is mounted, because decode is the ceiling. Registering probes the URL first (live / VOD / CORS) so a bad feed is caught before it reaches the wall.
+- **Per-feed audio.** Everything starts muted so autoplay works; the click supplies the gesture unmuting requires.
 - **Report incident** — escalate a feed with the measurements attached automatically.
 - **Incident log** timestamping every transition in and out of signal loss.
 
@@ -107,7 +109,9 @@ Both are the same shape as the failure this project is about: something that rep
 
 **The naive check modelled here is a realistic weak one**, not a straw man — `readyState >= 2 && !paused && !error`, a common shipped pattern. A stricter `readyState >= 3` would catch a plain buffer underrun. What defeats *every* readyState-based check is a frozen picture with an advancing clock, which is why frame advancement and media drift are the signals rather than a better threshold.
 
-**Not built:** pixel-level frozen-frame detection (hash consecutive downsampled frames) for the advancing-clock case; culling off-screen tiles; hysteresis on auto-promote, which currently re-promotes a flapping feed on every transition.
+**Hysteresis, and why it exists.** A state must hold for 12 consecutive worker ticks before it counts as an event. Without it a feed under load flaps — the machine stalls a decode, the watchdog correctly calls it stale, it recovers, and the cycle repeats, producing a dozen lost/restored pairs in twenty seconds. Every individual reading was true and the sequence was still useless. Measured after: 0 incidents in 50s under 21s of blocking time, while a genuine freeze still produced exactly one lost/restored pair. The pill shows raw state immediately; only *events* require confirmation.
+
+**Not built:** pixel-level frozen-frame detection (hash consecutive downsampled frames) for the advancing-clock case; culling off-screen tiles.
 
 ## Stack
 

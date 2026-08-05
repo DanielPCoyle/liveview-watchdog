@@ -279,3 +279,29 @@ button.on { background: var(--ink); color: var(--bg); border-color: var(--ink); 
 .ov__audio.on { opacity: 1; border-color: color-mix(in srgb, var(--ok-ink) 55%, var(--rule)); }
 .ov__bar { gap: 6px; }
 .ov__bar .ov__label { flex: 1; }
+
+/* ── empty add slot on the grid ─────────────────────────────────────────── */
+.ov--add {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+  background: transparent; border: 1px dashed color-mix(in srgb, var(--ink) 22%, transparent);
+  border-radius: 6px; color: var(--muted); cursor: pointer;
+}
+.ov--add:hover { border-color: color-mix(in srgb, var(--ink) 45%, transparent); color: var(--ink); background: color-mix(in srgb, var(--ink) 5%, transparent); }
+.ov__plus { font-size: 22px; line-height: 1; }
+.ov__addlabel { font-size: 10px; letter-spacing: .14em; text-transform: uppercase; }
+
+.ov__remove {
+  padding: 1px 6px; font-size: 12px; line-height: 1.3; opacity: 0; border-color: transparent;
+  background: transparent; color: var(--muted);
+}
+.ov:hover .ov__remove { opacity: .75; }
+.ov__remove:hover { opacity: 1; color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, var(--rule)); background: transparent; }
+
+.panel__groups input {
+  flex: 1; font-family: var(--mono); font-size: 11px; padding: 5px 7px; border-radius: 3px;
+  background: var(--panel); color: var(--ink); border: 1px solid var(--rule);
+}
+.field input {
+  font-family: var(--mono); font-size: 12px; padding: 8px 9px; border-radius: 4px;
+  background: var(--panel-2); color: var(--ink); border: 1px solid var(--rule);
+}
