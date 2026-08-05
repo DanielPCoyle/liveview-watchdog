@@ -35,7 +35,7 @@ start_one() {
     -f lavfi -i "testsrc2=size=640x360:rate=25" \
     -vf "drawtext=text='CAM $n  %{localtime\:%H\\\\\:%M\\\\\:%S}':fontsize=26:fontcolor=white:x=18:y=18:box=1:boxcolor=black@0.55" \
     -c:v libx264 -preset veryfast -tune zerolatency -g 25 -sc_threshold 0 -pix_fmt yuv420p \
-    -f hls -hls_time 1 -hls_list_size 4 \
+    -f hls -hls_time 1 -hls_list_size 8 -hls_delete_threshold 4 \
     -hls_flags delete_segments+omit_endlist+independent_segments \
     "$dir/index.m3u8" > "$dir/ffmpeg.log" 2>&1 &
   echo "$n $!" >> "$PIDS"

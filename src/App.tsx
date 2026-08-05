@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTile } from './useTile';
 import { useLongTasks, useJankInjector } from './perf';
+import { VideoWall, type WallStreamRef } from './VideoWall';
 import type { Fault, FromWorker, Liveness, ToWorker } from './types';
 
 /**
@@ -13,7 +14,7 @@ import type { Fault, FromWorker, Liveness, ToWorker } from './types';
  */
 const CAMERA_COUNT = 4;
 const SOURCES = Array.from({ length: CAMERA_COUNT }, (_, i) => ({
-  label: `cam${i + 1}`,
+  label: `CAM ${i + 1}`,
   src: `/live/cam${i + 1}/index.m3u8`,
 }));
 
@@ -21,7 +22,11 @@ const DEGRADED_AFTER_MS = 400;
 const STALE_AFTER_MS = 1200;
 
 interface WorkerStatus { liveness: Liveness; staleMs: number; drift: number | null }
+type Mode = 'dom' | 'webgl';
 
+interface Incident { at: string; cam: string; text: string; kind: 'lost' | 'restored' }
+
+// ── DOM presentation: one <video> element per tile ─────────────────────────
 function Tile(props: {
   id: string; label: string; src: string; fault: Fault;
   status: WorkerStatus | undefined;
@@ -64,15 +69,29 @@ function Tile(props: {
 
       <div className="tile__faults">
         {(['none', 'freeze', 'lowQuality'] as Fault[]).map((f) => (
-          <button
-            key={f}
-            className={props.fault === f ? 'on' : ''}
-            onClick={() => props.onFaultChange(props.id, f)}
-          >{f === 'none' ? 'healthy' : f === 'freeze' ? 'freeze' : 'low-q'}</button>
+          <button key={f} className={props.fault === f ? 'on' : ''} onClick={() => props.onFaultChange(props.id, f)}>
+            {f === 'none' ? 'healthy' : f === 'freeze' ? 'freeze' : 'low-q'}
+          </button>
         ))}
       </div>
     </div>
   );
+}
+
+// ── WebGL presentation: video decodes offscreen, GPU composites the wall ───
+function WallStream(props: {
+  id: string; src: string; fault: Fault;
+  onFrame: (id: string, at: number, mediaTime: number) => void;
+  onIdle: (id: string) => void;
+  onEl: (id: string, el: HTMLVideoElement | null) => void;
+}) {
+  const { attachRef } = useTile({
+    id: props.id, src: props.src, fault: props.fault, onFrame: props.onFrame, onIdle: props.onIdle,
+  });
+  const { onEl, id } = props;
+  const ref = useCallback((el: HTMLVideoElement | null) => { attachRef(el); onEl(id, el); }, [attachRef, onEl, id]);
+  // Kept in the document (not display:none) so decoding continues.
+  return <video ref={ref} muted playsInline />;
 }
 
 export default function App() {
@@ -81,15 +100,27 @@ export default function App() {
   const [statuses, setStatuses] = useState<Record<string, WorkerStatus>>({});
   const [jank, setJank] = useState(false);
   const [showNaiveOnly, setShowNaiveOnly] = useState(false);
+  const [mode, setMode] = useState<Mode>('dom');
+  const [wallFps, setWallFps] = useState(0);
+  const [elVersion, setElVersion] = useState(0);
+  const [incidents, setIncidents] = useState<Incident[]>([]);
+  const [clock, setClock] = useState(() => new Date().toLocaleTimeString());
 
   const workerRef = useRef<Worker | null>(null);
+  const elsRef = useRef<Record<string, HTMLVideoElement | null>>({});
+  const prevLiveness = useRef<Record<string, Liveness>>({});
   const perf = useLongTasks();
   useJankInjector(jank);
+
+  useEffect(() => {
+    const t = window.setInterval(() => setClock(new Date().toLocaleTimeString()), 1000);
+    return () => window.clearInterval(t);
+  }, []);
 
   const tiles = useMemo(
     () => Array.from({ length: tileCount }, (_, i) => {
       const s = SOURCES[i % SOURCES.length];
-      return { id: `t${i}`, label: s.label, src: s.src };
+      return { id: `t${i}`, label: tileCount > SOURCES.length ? `${s.label}·${Math.floor(i / SOURCES.length) + 1}` : s.label, src: s.src };
     }),
     [tileCount],
   );
@@ -116,6 +147,23 @@ export default function App() {
     }
   }, [tiles]);
 
+  // Incident log — transitions in and out of stale, timestamped. The record an
+  // operator would actually be asked for afterwards.
+  useEffect(() => {
+    const add: Incident[] = [];
+    for (const t of tiles) {
+      const now = statuses[t.id]?.liveness;
+      if (!now) continue;
+      const was = prevLiveness.current[t.id];
+      if (was && was !== now) {
+        if (now === 'stale') add.push({ at: new Date().toLocaleTimeString(), cam: t.label, text: 'signal lost — frames stopped arriving', kind: 'lost' });
+        else if (was === 'stale') add.push({ at: new Date().toLocaleTimeString(), cam: t.label, text: 'signal restored', kind: 'restored' });
+      }
+      prevLiveness.current[t.id] = now;
+    }
+    if (add.length) setIncidents((prev) => [...add, ...prev].slice(0, 40));
+  }, [statuses, tiles]);
+
   const onFrame = useCallback((id: string, at: number, mediaTime: number) => {
     workerRef.current?.postMessage({ type: 'frame', id, at, mediaTime } satisfies ToWorker);
   }, []);
@@ -125,64 +173,116 @@ export default function App() {
   const onFaultChange = useCallback((id: string, f: Fault) => {
     setFaults((prev) => ({ ...prev, [id]: f }));
   }, []);
+  // Video elements arrive via ref callbacks AFTER mount. A ref mutation can't
+  // tell React anything, so bump a version to recompute the stream list once
+  // the elements actually exist — otherwise the wall builds against nulls and
+  // renders black tiles.
+  const onEl = useCallback((id: string, el: HTMLVideoElement | null) => {
+    if (elsRef.current[id] === el) return;
+    elsRef.current[id] = el;
+    setElVersion((v) => v + 1);
+  }, []);
+  const onFps = useCallback((f: number) => setWallFps(f), []);
+
+  const wallStreams: WallStreamRef[] = useMemo(
+    () => tiles.map((t) => ({ id: t.id, el: elsRef.current[t.id] ?? null })),
+    // elVersion is the signal that refs changed; tiles covers set changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tiles, elVersion],
+  );
+
+  // Plain id → liveness map, so status ticks never invalidate wall layout.
+  const statusById = useMemo(() => {
+    const m: Record<string, Liveness> = {};
+    for (const t of tiles) m[t.id] = statuses[t.id]?.liveness ?? 'idle';
+    return m;
+  }, [tiles, statuses]);
 
   const liveCount = tiles.filter((t) => statuses[t.id]?.liveness === 'live').length;
   const staleCount = tiles.filter((t) => statuses[t.id]?.liveness === 'stale').length;
 
   return (
     <div className="app">
-      <header>
-        <h1>Liveview Watchdog</h1>
-        <p className="sub">
-          A tile is only <em>live</em> if frames are advancing. Connection state is not liveness —
-          freeze a tile below and watch the naive view stay green while the media clock stops.
-        </p>
+      <header className="bar">
+        <div className="bar__id">
+          <span className="bar__dot" aria-hidden />
+          <h1>Liveview Watchdog</h1>
+          <span className="bar__sub">frame-advancement monitoring</span>
+        </div>
+        <div className="bar__clock">{clock}</div>
       </header>
+
+      <section className="strip">
+        <div><span>feeds</span><strong>{tiles.length}</strong></div>
+        <div><span>live</span><strong className="ok">{liveCount}</strong></div>
+        <div><span>signal lost</span><strong className={staleCount ? 'bad' : ''}>{staleCount}</strong></div>
+        <div><span>compositor</span><strong>{mode === 'webgl' ? 'GPU' : 'DOM'}</strong></div>
+        <div><span>wall fps</span><strong>{mode === 'webgl' ? wallFps.toFixed(0) : '–'}</strong></div>
+        <div><span>long tasks</span><strong className={perf.longTasks ? 'warn' : ''}>{perf.longTasks}</strong></div>
+        <div><span>blocking</span><strong>{(perf.blockedMs / 1000).toFixed(1)}s</strong></div>
+      </section>
 
       <section className="controls">
         <label>
-          tiles
-          <input type="range" min={1} max={24} value={tileCount}
-            onChange={(e) => setTileCount(Number(e.target.value))} />
+          feeds
+          <input type="range" min={1} max={64} value={tileCount} onChange={(e) => setTileCount(Number(e.target.value))} />
           <output>{tileCount}</output>
         </label>
-
+        <button className={mode === 'webgl' ? 'on' : ''} onClick={() => setMode((m) => (m === 'dom' ? 'webgl' : 'dom'))}>
+          compositor: {mode === 'webgl' ? 'GPU (three.js)' : 'DOM <video>'}
+        </button>
         <button className={jank ? 'on' : ''} onClick={() => setJank((v) => !v)}>
           {jank ? 'stop main-thread jank' : 'inject main-thread jank'}
         </button>
-
-        <button className={showNaiveOnly ? 'on' : ''} onClick={() => setShowNaiveOnly((v) => !v)}>
-          {showNaiveOnly ? 'showing: naive check' : 'showing: frame-aware watchdog'}
-        </button>
+        {mode === 'dom' && (
+          <button className={showNaiveOnly ? 'on' : ''} onClick={() => setShowNaiveOnly((v) => !v)}>
+            {showNaiveOnly ? 'showing: naive "is it connected?"' : 'showing: frame-aware watchdog'}
+          </button>
+        )}
       </section>
 
-      <section className="hud">
-        <div><span>live</span><strong className="ok">{liveCount}</strong></div>
-        <div><span>stale</span><strong className={staleCount ? 'bad' : ''}>{staleCount}</strong></div>
-        <div><span>long tasks</span><strong className={perf.longTasks ? 'warn' : ''}>{perf.longTasks}</strong></div>
-        <div><span>longest task</span><strong>{perf.longestTaskMs.toFixed(0)} ms</strong></div>
-        <div><span>blocking time</span><strong>{(perf.blockedMs / 1000).toFixed(1)} s</strong></div>
-      </section>
+      <div className="stage">
+        {mode === 'dom' ? (
+          <main className="grid">
+            {tiles.map((t) => (
+              <Tile key={t.id} id={t.id} label={t.label} src={t.src}
+                fault={faults[t.id] ?? 'none'} status={statuses[t.id]}
+                onFrame={onFrame} onIdle={onIdle} onFaultChange={onFaultChange}
+                showNaiveOnly={showNaiveOnly} />
+            ))}
+          </main>
+        ) : (
+          <>
+            <div className="decode-pool" aria-hidden>
+              {tiles.map((t) => (
+                <WallStream key={t.id} id={t.id} src={t.src} fault={faults[t.id] ?? 'none'}
+                  onFrame={onFrame} onIdle={onIdle} onEl={onEl} />
+              ))}
+            </div>
+            <VideoWall streams={wallStreams} statusById={statusById} onFps={onFps} />
+          </>
+        )}
 
-      <main className="grid">
-        {tiles.map((t) => (
-          <Tile
-            key={t.id} id={t.id} label={t.label} src={t.src}
-            fault={faults[t.id] ?? 'none'}
-            status={statuses[t.id]}
-            onFrame={onFrame} onIdle={onIdle} onFaultChange={onFaultChange}
-            showNaiveOnly={showNaiveOnly}
-          />
-        ))}
-      </main>
-
-      <footer>
-        <p>
-          The watchdog runs in a Worker with its own clock. That matters: a main-thread liveness
-          check is a victim of the jank it is meant to detect — while the thread is blocked, its
-          timer doesn&rsquo;t fire either, and silence reads as health.
-        </p>
-      </footer>
+        <aside className="log">
+          <h2>Incidents</h2>
+          {incidents.length === 0 ? (
+            <p className="log__empty">No signal loss recorded.</p>
+          ) : (
+            <ul>
+              {incidents.map((i, n) => (
+                <li key={n} className={i.kind}>
+                  <time>{i.at}</time>
+                  <span className="log__cam">{i.cam}</span>
+                  <span>{i.text}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          <p className="log__note">
+            Use <code>scripts/cameras.sh freeze N</code> to stop a camera at the encoder.
+          </p>
+        </aside>
+      </div>
     </div>
   );
 }
