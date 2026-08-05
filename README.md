@@ -22,7 +22,8 @@ Most dashboards answer *"is it connected?"* That's a proxy. This answers *"are f
 - **Ignore is acknowledgement, not muting.** An ignored feed keeps being watched, keeps counting as signal lost and keeps writing to the incident log — it just stops being auto-promoted, and the header shows how many feeds are being suppressed. A manual pick still overrides it.
 - **Per-feed audio.** Everything starts muted so autoplay works; the click supplies the gesture unmuting requires.
 - **Report incident** — escalate a feed with the measurements attached automatically.
-- **Incident log** timestamping every transition in and out of signal loss.
+- **Incident history per feed, not one merged log.** Every transition in and out of signal loss is timestamped, and each row carries its own latest event plus a document icon that opens that camera's full report: current liveness, stale duration, media drift, how many times it has dropped, every incident, every escalation, and a copy-as-JSON. A shared log is fine while you are watching it happen and useless afterwards — the question an operator actually asks is *"what has this camera been doing"*, and a merged stream answers it only by making you read past everyone else's events.
+- **Responsive down to a phone.** Wide: roster beside the wall. Narrow (≤699px): the wall stops being worth compositing, so it is dropped entirely and the roster becomes the app — each row draws its own picture, a promoted feed expands to full width, and reorder gets ↑/↓ buttons because touch has neither drag-and-drop nor alt+arrow. `freeze` moves into the row too, so the watchdog can still be made to fire on a phone.
 
 ## How liveness is measured
 
@@ -36,7 +37,9 @@ So liveness also requires **windowed media drift** — how far the media clock m
 
 ## Escalation
 
-**Report incident** on a promoted feed opens a form with severity and a note — and attaches the evidence captured at that moment: liveness, how long it's been stale, media drift, decoded and dropped counts, and the source URL. Escalations are listed in the sidebar and copy out as JSON.
+**Report incident** — from a promoted tile or straight from a roster row — opens a form with severity and a note, and attaches the evidence captured at that moment: liveness, how long it's been stale, media drift, decoded and dropped counts, and the source URL. Escalations are filed against the feed and copy out as JSON from its report.
+
+Reporting from the roster is worth a note, because the roster cannot assemble that evidence itself: decode counts belong to the decoder, which lives with the tile. So the roster names a feed and the feed answers with its own numbers, rather than the list keeping a second copy of measurements that could disagree with the first.
 
 The point is that the person receiving it gets numbers rather than "camera 3 looks funny". That's the difference between a ticket someone can action and one that starts with a round of questions.
 
@@ -134,6 +137,10 @@ Both are the same shape as the failure this project is about: something that rep
 **The naive check modelled here is a realistic weak one**, not a straw man — `readyState >= 2 && !paused && !error`, a common shipped pattern. A stricter `readyState >= 3` would catch a plain buffer underrun. What defeats *every* readyState-based check is a frozen picture with an advancing clock, which is why frame advancement and media drift are the signals rather than a better threshold.
 
 **Hysteresis, and why it exists.** A state must hold for 12 consecutive worker ticks before it counts as an event. Without it a feed under load flaps — the machine stalls a decode, the watchdog correctly calls it stale, it recovers, and the cycle repeats, producing a dozen lost/restored pairs in twenty seconds. Every individual reading was true and the sequence was still useless. Measured after: 0 incidents in 50s under 21s of blocking time, while a genuine freeze still produced exactly one lost/restored pair. The pill shows raw state immediately; only *events* require confirmation.
+
+**List mode draws thumbnails from the decoders, and that relies on a trick.** The `<video>` elements are kept in the document at two pixels wide with near-zero opacity, because `display: none` stops decoding and reparenting them remounts the element and tears down the hls attachment. `drawImage` reads the decoded frame at its intrinsic size, so it does not care how small the source element is. Verified in Chromium; a browser that decides not to decode a near-invisible video would show black thumbnails while the liveness pills stayed correct, since those are measured from `getVideoPlaybackQuality()` rather than from anything drawn.
+
+**Reordering on touch is buttons, not dragging.** HTML5 drag-and-drop does not fire for touch, and a pointer-events implementation is real work for a demo; the ↑/↓ controls do the same operation.
 
 **Not built:** pixel-level frozen-frame detection (hash consecutive downsampled frames) for the advancing-clock case; culling off-screen tiles.
 

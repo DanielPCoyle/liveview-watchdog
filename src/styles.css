@@ -71,12 +71,14 @@ button.on { background: var(--ink); color: var(--bg); border-color: var(--ink); 
 :focus-visible { outline: 2px solid var(--bad); outline-offset: 2px; }
 
 /* ── stage: roster + wall + incident log ────────────────────────────────── */
+/* Two columns: the roster carries the incident history now, per feed, so there
+   is no third panel to fit. */
 .stage {
   flex: 1; min-height: 0; display: grid;
-  grid-template-columns: 244px minmax(0, 1fr) 280px;
+  grid-template-columns: 300px minmax(0, 1fr);
 }
-@media (max-width: 1180px) { .stage { grid-template-columns: 214px minmax(0, 1fr) 250px; } }
-@media (max-width: 900px) { .stage { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 1180px) { .stage { grid-template-columns: 268px minmax(0, 1fr); } }
+@media (max-width: 1023px) { .stage { grid-template-columns: 240px minmax(0, 1fr); } }
 
 .wall { position: absolute; inset: 0; }
 .wall-host { position: relative; min-height: 0; min-width: 0; overflow: hidden; }
@@ -94,12 +96,19 @@ button.on { background: var(--ink); color: var(--bg); border-color: var(--ink); 
 .overlays { position: absolute; inset: 0; pointer-events: none; }
 
 .ov {
-  position: absolute; pointer-events: auto; cursor: pointer;
+  position: absolute; pointer-events: auto; cursor: pointer; z-index: 1;
   display: flex; flex-direction: column; justify-content: flex-end;
   /* Eased to match the render loop's lerp so chrome tracks the video. */
   transition: left .42s cubic-bezier(.22,.61,.36,1), top .42s cubic-bezier(.22,.61,.36,1),
               width .42s cubic-bezier(.22,.61,.36,1), height .42s cubic-bezier(.22,.61,.36,1);
 }
+/* Stacking is explicit rather than left to DOM order. A swollen tile overlaps
+   its neighbours, and without this the one that happens to come later in the
+   registry paints over it — and takes the clicks with it, so pointing at a row
+   and then clicking the tile it raised would open a different camera. */
+.ov--hero { z-index: 2; }
+.ov--front { z-index: 3; }
+
 .ov:hover .ov__bar { background: color-mix(in srgb, var(--bg) 72%, transparent); }
 .ov:focus-visible { outline: 2px solid var(--bad); outline-offset: -2px; }
 
@@ -354,17 +363,53 @@ button.on { background: var(--ink); color: var(--bg); border-color: var(--ink); 
 .roster__item[draggable="true"] .roster__grip { cursor: grab; }
 
 .roster__pick {
-  width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  width: 100%; display: flex; flex-direction: column; gap: 6px;
   padding: 6px 7px; border-color: transparent; border-radius: 0; background: transparent;
   text-align: left;
 }
+.roster__meta { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 8px; }
 .roster__grip { flex: none; color: var(--muted); font-size: 11px; letter-spacing: -.1em; }
-.roster__pick .roster__name { flex: 1; }
+.roster__meta .roster__name { flex: 1; }
 .roster__name {
   font-size: 10.5px; letter-spacing: .07em; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap;
 }
 .roster__pick .pill { flex: none; }
+
+/* ── per-feed incident row ──────────────────────────────────────────────── */
+.icon { width: 13px; height: 13px; fill: currentColor; flex: none; display: block; }
+
+.roster__inc {
+  display: flex; align-items: center; gap: 6px; font-size: 10px;
+  padding: 5px 6px 5px 7px; color: var(--muted);
+  border-top: 1px solid var(--rule);
+}
+.roster__inc time { font-variant-numeric: tabular-nums; flex: none; }
+.roster__inc-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.roster__inc-none { flex: 1; opacity: .65; }
+.roster__inc-icon { display: flex; }
+.roster__inc-icon.lost { color: var(--bad); }
+.roster__inc-icon.restored { color: var(--ok-ink); }
+.roster__inc-n, .roster__inc-esc {
+  flex: none; font-size: 9px; padding: 1px 5px; border-radius: 8px;
+  background: color-mix(in srgb, var(--ink) 12%, transparent); color: var(--ink);
+}
+.roster__inc-esc { color: var(--warn); }
+.roster__inspect {
+  flex: none; display: flex; align-items: center; justify-content: center;
+  padding: 3px; border-color: transparent; color: var(--muted); background: transparent;
+}
+.roster__inspect:hover { color: var(--ink); background: color-mix(in srgb, var(--ink) 14%, transparent); }
+
+.report { width: min(560px, calc(100vw - 32px)); max-height: 86vh; overflow: auto; }
+.report__log { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.report__log li {
+  display: grid; grid-template-columns: auto 1fr; gap: 8px; font-size: 11px;
+  padding-bottom: 6px; border-bottom: 1px solid var(--rule); color: var(--muted);
+}
+.report__log time { font-variant-numeric: tabular-nums; }
+.report__log li.lost time { color: var(--bad); }
+.report__log li.restored time { color: var(--ok-ink); }
 
 .roster__actions {
   display: flex; flex-wrap: wrap; gap: 3px; padding: 0 6px 6px;
@@ -372,8 +417,62 @@ button.on { background: var(--ink); color: var(--bg); border-color: var(--ink); 
 .roster__actions button { padding: 2px 6px; font-size: 9px; }
 .roster__audio { font-size: 10px; padding: 1px 5px; opacity: .7; }
 .roster__audio:hover { opacity: 1; }
-.roster__remove { margin-left: auto; font-size: 11px; padding: 1px 6px; color: var(--muted); }
+/* Separated by a gap rather than pushed right with margin-left:auto — the auto
+   margin forces a line break of its own the moment the actions wrap, which they
+   do at every width below the widest. */
+.roster__remove { margin-left: 3px; font-size: 11px; padding: 1px 6px; color: var(--muted); }
 .roster__remove:hover { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, var(--rule)); background: transparent; }
+
+/* ── list mode: the roster IS the app ───────────────────────────────────── */
+.roster__thumb {
+  display: block; height: auto; border-radius: 3px;
+  background: #05080c; border: 1px solid var(--rule);
+}
+.roster__add { width: 100%; padding: 10px; border-style: dashed; color: var(--muted); }
+.roster__add:hover { color: var(--ink); }
+
+@media (max-width: 699px) {
+  .stage--list { display: block; overflow: auto; }
+  .stage--list .roster { border-right: 0; overflow: visible; }
+  .stage--list .roster__inc { font-size: 11px; padding: 7px 8px; }
+  .stage--list .icon { width: 15px; height: 15px; }
+  .stage--list .roster__inspect { min-width: 34px; min-height: 30px; }
+
+  /* The decoders live in here and must keep decoding, so this is collapsed to
+     a pixel rather than removed or display:none'd — same trick, and same
+     reason, as .decoder itself. Only the WebGL canvas actually goes away. */
+  .stage--list .wall-host {
+    position: fixed; top: 0; left: 0; width: 1px; height: 1px;
+    overflow: hidden; opacity: .01; pointer-events: none;
+  }
+
+  .stage--list .roster__pick { flex-direction: row; align-items: center; gap: 10px; padding: 8px; }
+  .stage--list .roster__thumb { width: 108px; flex: none; }
+  .stage--list .roster__meta { flex: 1; min-width: 0; }
+
+  /* Focused (or auto-promoted) row: the picture becomes the row. */
+  .stage--list .roster__item.on .roster__pick { flex-direction: column; align-items: stretch; }
+  .stage--list .roster__item.on .roster__thumb { width: 100%; }
+
+  /* Touch targets. */
+  .stage--list .roster__pick { min-height: 44px; }
+  .stage--list .roster__actions { gap: 5px; padding: 0 8px 8px; }
+  /* Eight controls never fit one phone-width line. Letting them grow makes the
+     wrap look deliberate — two filled rows — instead of stranding whichever
+     button happened to fall off the end. */
+  .stage--list .roster__actions button {
+    flex: 1 1 21%; min-height: 34px; padding: 4px 8px; font-size: 10px;
+  }
+  .stage--list .roster__remove { min-width: 36px; }
+
+  .bar { padding: 10px 12px; }
+  .bar__sub { display: none; }
+  .bar__clock { font-size: 15px; }
+  .strip > div { flex: 1 1 33%; padding: 7px 10px; }
+  .strip strong { font-size: 15px; }
+  .controls { padding: 8px 12px; gap: 6px; }
+  .modal__panel { padding: 14px; gap: 12px; }
+}
 
 /* react-select renders its own DOM; only the bits styles={} can't reach. */
 .rs__note { font-size: 10px; color: var(--muted); margin-top: 2px; line-height: 1.4; }

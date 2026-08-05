@@ -17,6 +17,26 @@ import {
  * can't be starved and none of the live-edge behaviour this project measures
  * ever happens. Using them here would have been a demo of the wrong thing.
  */
+/**
+ * Material Symbols, inlined rather than loaded as a font.
+ *
+ * Two glyphs do not justify a webfont request on a page whose whole job is to
+ * keep decoding video, and the wall should not go iconless because fonts.gstatic
+ * is unreachable. Paths are the official 24px outlined set (Apache-2.0).
+ */
+const ICONS = {
+  warning: 'm40-120 440-760 440 760H40Zm138-80h604L480-720 178-200Zm330.5-51.5Q520-263 520-280t-11.5-28.5Q497-320 480-320t-28.5 11.5Q440-297 440-280t11.5 28.5Q463-240 480-240t28.5-11.5ZM440-360h80v-200h-80v200Zm40-100Z',
+  description: 'M320-240h320v-80H320v80Zm0-160h320v-80H320v80ZM240-80q-33 0-56.5-23.5T160-160v-640q0-33 23.5-56.5T240-880h320l240 240v480q0 33-23.5 56.5T720-80H240Zm280-520v-200H240v640h480v-440H520ZM240-800v200-200 640-640Z',
+} as const;
+
+function Icon({ name }: { name: keyof typeof ICONS }) {
+  return (
+    <svg className="icon" viewBox="0 -960 960 960" aria-hidden focusable="false">
+      <path d={ICONS[name]} />
+    </svg>
+  );
+}
+
 const DEGRADED_AFTER_MS = 400;
 const STALE_AFTER_MS = 1200;
 
@@ -42,7 +62,12 @@ interface WorkerStatus { liveness: Liveness; staleMs: number; drift: number | nu
  * before it is treated as an event.
  */
 const CONFIRM_TICKS = 12;
-interface Incident { at: string; cam: string; text: string; kind: 'lost' | 'restored' }
+/**
+ * `feedId` as well as `cam`: labels are neither unique nor stable — two feeds
+ * can carry the same name and editing one renames it — so grouping a feed's own
+ * history by its display name would attach incidents to the wrong camera.
+ */
+interface Incident { at: string; feedId: string; cam: string; text: string; kind: 'lost' | 'restored' }
 
 /**
  * An escalation is a snapshot, not a message. The evidence is captured at the
@@ -53,6 +78,7 @@ interface Incident { at: string; cam: string; text: string; kind: 'lost' | 'rest
  */
 interface Escalation {
   id: string;
+  feedId: string;
   at: string;
   cam: string;
   severity: 'low' | 'medium' | 'high';
@@ -83,6 +109,8 @@ function pct(b: Box) {
 function Stream(props: {
   id: string; label: string; src: string; fault: Fault;
   box: Box | undefined; isHero: boolean; resolved: boolean;
+  /** Pointed at from the roster — this tile is swollen and must be in front. */
+  isHovered: boolean;
   status: WorkerStatus | undefined; showNaive: boolean; audible: boolean;
   onToggleAudio: (id: string) => void;
   onFrame: (id: string, at: number, mediaTime: number) => void;
@@ -135,7 +163,7 @@ function Stream(props: {
           attachment and leaves a dead readyState-0 element behind. */}
       <video className="decoder" ref={videoRef} muted playsInline />
       {props.box && (
-        <div className={`ov ov--${shown} ${props.isHero ? 'ov--hero' : ''}`} style={pct(props.box)}
+        <div className={`ov ov--${shown} ${props.isHero ? 'ov--hero' : ''} ${props.isHovered ? 'ov--front' : ''}`} style={pct(props.box)}
           onClick={() => props.onToggleFocus(props.id)}
           role="button" tabIndex={0}
           onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); props.onToggleFocus(props.id); } }}
@@ -443,8 +471,158 @@ function FeedDialog(props: {
 
 interface Tile { id: string; label: string; src: string; faultable: boolean }
 
+/**
+ * Everything known about ONE feed, in one place.
+ *
+ * This is what the incident log used to be, cut per camera. A shared log is
+ * fine while you are watching it happen and useless afterwards: the question an
+ * operator actually asks is "what has THIS camera been doing", and answering it
+ * from a merged stream means reading past everyone else's events.
+ */
+function FeedReport(props: {
+  tile: Tile;
+  liveness: Liveness;
+  status: WorkerStatus | undefined;
+  incidents: Incident[];
+  escalations: Escalation[];
+  onClose: () => void;
+}) {
+  const { tile, incidents, escalations, status, liveness } = props;
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') props.onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [props]);
+
+  const lost = incidents.filter((i) => i.kind === 'lost').length;
+
+  return (
+    <div className="modal" role="dialog" aria-modal="true" aria-label={`Report for ${tile.label}`}
+      onClick={(e) => { if (e.target === e.currentTarget) props.onClose(); }}>
+      <div className="modal__panel report">
+        <h2>
+          {tile.label}
+          <button className="log__copy" title="Copy this feed's report as JSON"
+            onClick={() => void navigator.clipboard?.writeText(JSON.stringify(
+              { feed: tile.label, source: tile.src, liveness, incidents, escalations }, null, 2,
+            ))}>copy</button>
+        </h2>
+
+        <dl className="evidence">
+          <div><dt>liveness</dt><dd className={liveness === 'stale' ? 'bad' : ''}>{liveness}</dd></div>
+          <div><dt>stale for</dt><dd>{((status?.staleMs ?? 0) / 1000).toFixed(1)}s</dd></div>
+          <div><dt>media drift</dt><dd className={status?.drift != null && status.drift < 0.35 ? 'bad' : ''}>
+            {status?.drift == null ? '–' : status.drift.toFixed(2)}</dd></div>
+          <div><dt>signal lost</dt><dd className={lost ? 'bad' : ''}>{lost}×</dd></div>
+          <div className="evidence__src"><dt>source</dt><dd>{tile.src}</dd></div>
+        </dl>
+
+        {escalations.length > 0 && (
+          <div className="field">
+            <span>Escalations</span>
+            <ul className="esc">
+              {escalations.map((e) => (
+                <li key={e.id} className={`esc--${e.severity}`}>
+                  <time>{e.at}</time>
+                  <span className="esc__sev">{e.severity}</span>
+                  {e.note && <span className="esc__note">{e.note}</span>}
+                  <span className="esc__ev">
+                    {e.evidence.liveness} · stale {(e.evidence.staleMs / 1000).toFixed(1)}s · drift{' '}
+                    {e.evidence.drift == null ? '–' : e.evidence.drift.toFixed(2)} · dropped {e.evidence.dropped}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        <div className="field">
+          <span>History</span>
+          {incidents.length === 0 ? (
+            <p className="log__empty">No signal loss recorded for this feed.</p>
+          ) : (
+            <ul className="report__log">
+              {incidents.map((i, n) => (
+                <li key={n} className={i.kind}>
+                  <time>{i.at}</time>
+                  <span>{i.text}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <div className="modal__actions">
+          <button type="button" className="on" onClick={props.onClose}>close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 const FILTERS = ['all', 'live', 'degraded', 'stale'] as const;
 type FilterKey = (typeof FILTERS)[number];
+
+/**
+ * Below this width the wall stops being worth compositing. A phone fits one or
+ * two tiles at a legible size, so a GPU surface plus a DOM overlay per tile
+ * buys nothing over the frames we are already decoding — and a WebGL canvas
+ * cannot scroll with a list. The roster becomes the whole app instead, and each
+ * row draws its own picture.
+ */
+const LIST_MODE_MAX = 699;
+
+function useListMode() {
+  const query = `(max-width: ${LIST_MODE_MAX}px)`;
+  const [narrow, setNarrow] = useState(() => window.matchMedia(query).matches);
+  useEffect(() => {
+    const mq = window.matchMedia(query);
+    const onChange = () => setNarrow(mq.matches);
+    onChange();
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, [query]);
+  return narrow;
+}
+
+/**
+ * A row's picture, drawn from the decoder that already exists.
+ *
+ * Deliberately NOT a second <video> for the same stream: that is a second
+ * decoder, and decode is the ceiling this whole project keeps running into —
+ * the list would cost double what the wall costs. Deliberately not the wall's
+ * canvas either, which cannot scroll with the rows.
+ *
+ * drawImage reads the decoded frame at its intrinsic size, so it works fine
+ * against an element that is two pixels wide and effectively invisible, which
+ * is exactly what the decoders are.
+ */
+function Thumb({ el, big }: { el: HTMLVideoElement | null; big: boolean }) {
+  const ref = useRef<HTMLCanvasElement | null>(null);
+  useEffect(() => {
+    const c = ref.current;
+    const ctx = c?.getContext('2d');
+    if (!c || !ctx || !el) return;
+    let raf = 0;
+    let last = 0;
+    const loop = (t: number) => {
+      raf = requestAnimationFrame(loop);
+      // ~12fps. It is a thumbnail: it only has to look alive. The pill beside
+      // it is what actually reports liveness, and it is measured off decoded
+      // frames rather than off anything drawn here.
+      if (t - last < 80) return;
+      last = t;
+      if (el.readyState >= 2 && el.videoWidth) ctx.drawImage(el, 0, 0, c.width, c.height);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [el, big]);
+  return (
+    <canvas ref={ref} className="roster__thumb" aria-hidden
+      width={big ? 480 : 160} height={big ? 270 : 90} />
+  );
+}
 
 /**
  * Roster for the active group — one panel per group, showing only what that
@@ -475,6 +653,15 @@ function FeedRoster(props: {
   onEdit: (id: string) => void;
   onRemove: (id: string) => void;
   onReorder: (dragId: string, dropId: string) => void;
+  /** Narrow layout: the roster is the whole app, so it carries the picture. */
+  listMode: boolean;
+  elsById: Record<string, HTMLVideoElement | null>;
+  faults: Record<string, Fault>;
+  onToggleFreeze: (id: string) => void;
+  onAdd: () => void;
+  incidentsByFeed: Record<string, Incident[]>;
+  escalationsByFeed: Record<string, Escalation[]>;
+  onOpenReport: (id: string) => void;
 }) {
   const [q, setQ] = useState('');
   const [filter, setFilter] = useState<FilterKey>('all');
@@ -586,15 +773,73 @@ function FeedRoster(props: {
                     e.preventDefault();
                     nudge(t.id, e.key === 'ArrowUp' ? -1 : 1);
                   }}>
-                  <span className="roster__grip" aria-hidden
-                    title={narrowed ? 'Clear the search to reorder' : 'Drag to reorder — or alt + ↑/↓'}>⠿</span>
-                  <span className="roster__name">{t.label}</span>
-                  <span className={`pill pill--${live}`}>
-                    {live}{live !== 'idle' && live !== 'live' ? ` ${((statuses[t.id]?.staleMs ?? 0) / 1000).toFixed(1)}s` : ''}
+                  {props.listMode && <Thumb el={props.elsById[t.id] ?? null} big={isHero} />}
+                  <span className="roster__meta">
+                    {!props.listMode && (
+                      <span className="roster__grip" aria-hidden
+                        title={narrowed ? 'Clear the search to reorder' : 'Drag to reorder — or alt + ↑/↓'}>⠿</span>
+                    )}
+                    <span className="roster__name">{t.label}</span>
+                    <span className={`pill pill--${live}`}>
+                      {live}{live !== 'idle' && live !== 'live' ? ` ${((statuses[t.id]?.staleMs ?? 0) / 1000).toFixed(1)}s` : ''}
+                    </span>
                   </span>
                 </button>
 
+                {/* The incident log, cut per camera and folded into its row.
+                    Latest event only — the rest is behind the report. */}
+                <div className="roster__inc">
+                  {(() => {
+                    const inc = props.incidentsByFeed[t.id] ?? [];
+                    const esc = props.escalationsByFeed[t.id] ?? [];
+                    const latest = inc[0];
+                    return (
+                      <>
+                        {latest ? (
+                          <>
+                            <span className={`roster__inc-icon ${latest.kind}`}><Icon name="warning" /></span>
+                            <time>{latest.at}</time>
+                            <span className="roster__inc-text">
+                              {latest.kind === 'lost' ? 'signal lost' : 'restored'}
+                            </span>
+                            {inc.length > 1 && <span className="roster__inc-n">{inc.length}</span>}
+                          </>
+                        ) : (
+                          <span className="roster__inc-none">no incidents</span>
+                        )}
+                        {esc.length > 0 && <span className="roster__inc-esc">{esc.length} escalated</span>}
+                        <button className="roster__inspect" title={`Full report for ${t.label}`}
+                          aria-label={`Full report for ${t.label}`}
+                          onClick={() => props.onOpenReport(t.id)}>
+                          <Icon name="description" />
+                        </button>
+                      </>
+                    );
+                  })()}
+                </div>
+
                 <div className="roster__actions">
+                  {/* Touch has no drag-and-drop and no alt+arrow, so the same
+                      move gets explicit controls when the list is the app. */}
+                  {props.listMode && !narrowed && (
+                    <>
+                      <button aria-label={`Move ${t.label} up`} title="Move up"
+                        disabled={tiles[0]?.id === t.id}
+                        onClick={() => nudge(t.id, -1)}>↑</button>
+                      <button aria-label={`Move ${t.label} down`} title="Move down"
+                        disabled={tiles[tiles.length - 1]?.id === t.id}
+                        onClick={() => nudge(t.id, 1)}>↓</button>
+                    </>
+                  )}
+                  {/* The wall's fault controls live on a promoted tile, which
+                      does not exist here — without this the list can show the
+                      watchdog but never make it fire. */}
+                  {props.listMode && (
+                    <button className={props.faults[t.id] === 'freeze' ? 'on' : ''}
+                      aria-pressed={props.faults[t.id] === 'freeze'}
+                      title="Cut this feed off at the client: the buffer starves and the picture stops, with no error event"
+                      onClick={() => props.onToggleFreeze(t.id)}>freeze</button>
+                  )}
                   <button onClick={() => props.onReport(t.id)}
                     title={`Escalate ${t.label} with its measurements attached`}>report</button>
                   <button className={ig ? 'on' : ''} aria-pressed={ig}
@@ -619,6 +864,16 @@ function FeedRoster(props: {
           })}
         </ul>
       )}
+
+      {/* The empty slot lives on the wall, and in list mode there is no wall. */}
+      {props.listMode && (
+        <button className="roster__add" onClick={props.onAdd}>+ add feed</button>
+      )}
+
+      <p className="log__note">
+        <code>freeze</code> cuts a feed off at the client; <code>report</code> escalates it with
+        the measurements attached. The document icon opens a feed's full history.
+      </p>
     </aside>
   );
 }
@@ -646,6 +901,8 @@ export default function App() {
 
   const [hoverId, setHoverId] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
+  /** Feed whose full report is open. */
+  const [inspecting, setInspecting] = useState<string | null>(null);
   /**
    * Acknowledged feeds. Deliberately NOT persisted: an acknowledgement is about
    * a shift, not about a camera, and one that silently survives a reload is how
@@ -655,6 +912,7 @@ export default function App() {
   /** Roster escalation requests — see Stream's reportNonce. */
   const [reportReq, setReportReq] = useState<{ id: string; n: number } | null>(null);
 
+  const listMode = useListMode();
   const workerRef = useRef<Worker | null>(null);
   const elsRef = useRef<Record<string, HTMLVideoElement | null>>({});
   const prevLiveness = useRef<Record<string, Liveness>>({});
@@ -741,8 +999,8 @@ export default function App() {
       if (!now) continue;
       const was = prevLiveness.current[t.id];
       if (was && was !== now) {
-        if (now === 'stale') add.push({ at: new Date().toLocaleTimeString(), cam: t.label, text: 'signal lost — frames stopped arriving', kind: 'lost' });
-        else if (was === 'stale') { add.push({ at: new Date().toLocaleTimeString(), cam: t.label, text: 'signal restored', kind: 'restored' }); recovered.push(t.id); }
+        if (now === 'stale') add.push({ at: new Date().toLocaleTimeString(), feedId: t.id, cam: t.label, text: 'signal lost — frames stopped arriving', kind: 'lost' });
+        else if (was === 'stale') { add.push({ at: new Date().toLocaleTimeString(), feedId: t.id, cam: t.label, text: 'signal restored', kind: 'restored' }); recovered.push(t.id); }
       }
       prevLiveness.current[t.id] = now;
     }
@@ -888,6 +1146,9 @@ export default function App() {
   const toggleIgnore = useCallback((id: string) => {
     setIgnored((prev) => ({ ...prev, [id]: !prev[id] }));
   }, []);
+  const toggleFreeze = useCallback((id: string) => {
+    setFaults((prev) => ({ ...prev, [id]: prev[id] === 'freeze' ? 'none' : 'freeze' }));
+  }, []);
   const requestReport = useCallback((id: string) => {
     setReportReq((prev) => ({ id, n: (prev?.n ?? 0) + 1 }));
   }, []);
@@ -904,6 +1165,7 @@ export default function App() {
     if (!reporting) return;
     const entry: Escalation = {
       id: `${reporting.id}-${Date.now()}`,
+      feedId: reporting.id,
       at: new Date().toLocaleTimeString(),
       cam: reporting.cam, severity, note: note.trim(), evidence: reporting.evidence,
     };
@@ -916,6 +1178,24 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [tiles, elVersion],
   );
+
+  const incidentsByFeed = useMemo(() => {
+    const m: Record<string, Incident[]> = {};
+    for (const i of incidents) (m[i.feedId] ??= []).push(i);
+    return m;
+  }, [incidents]);
+
+  const escalationsByFeed = useMemo(() => {
+    const m: Record<string, Escalation[]> = {};
+    for (const e of escalations) (m[e.feedId] ??= []).push(e);
+    return m;
+  }, [escalations]);
+
+  const elsById = useMemo(() => {
+    const m: Record<string, HTMLVideoElement | null> = {};
+    for (const s of wallStreams) m[s.id] = s.el;
+    return m;
+  }, [wallStreams]);
 
   const statusById = useMemo(() => {
     const m: Record<string, Liveness> = {};
@@ -945,7 +1225,13 @@ export default function App() {
         {/* Suppression has to be visible. A feed quietly excluded from
             promotion is exactly the state an operator must not inherit blind. */}
         {ignoredCount > 0 && <div><span>ignored</span><strong className="warn">{ignoredCount}</strong></div>}
-        <div><span>wall fps</span><strong>{wallFps.toFixed(0)}</strong></div>
+        {/* The escalations list now lives per feed, so the count is what keeps
+            "somebody raised a ticket" visible without opening anything. */}
+        {escalations.length > 0 && <div><span>escalated</span><strong className="warn">{escalations.length}</strong></div>}
+        {/* No wall in list mode, so no wall fps — reporting 0 for a compositor
+            that isn't running is the kind of confident-but-wrong number this
+            project is about. */}
+        {!listMode && <div><span>wall fps</span><strong>{wallFps.toFixed(0)}</strong></div>}
         <div><span>long tasks</span><strong className={perf.longTasks ? 'warn' : ''}>{perf.longTasks}</strong></div>
         <div><span>blocking</span><strong>{(perf.blockedMs / 1000).toFixed(1)}s</strong></div>
       </section>
@@ -977,24 +1263,36 @@ export default function App() {
         {heroIds.length > 0 && <button onClick={clearFocus}>✕ back to wall (Esc)</button>}
       </section>
 
-      <div className="stage">
+      <div className={`stage ${listMode ? 'stage--list' : ''}`}>
         <FeedRoster
           groupName={registry.groups.find((g) => g.id === activeGroup)?.name ?? 'Feeds'}
           tiles={tiles} statuses={statuses} heroIds={heroIds}
           ignored={ignored} audible={audible}
           onHover={setHoverId} onPick={onToggleFocus} onReport={requestReport}
           onToggleIgnore={toggleIgnore} onToggleAudio={onToggleAudio}
-          onEdit={setEditing} onRemove={removeFeed} onReorder={reorderFeed} />
+          onEdit={setEditing} onRemove={removeFeed} onReorder={reorderFeed}
+          listMode={listMode} elsById={elsById} faults={faults}
+          onToggleFreeze={toggleFreeze} onAdd={() => setAdding(true)}
+          incidentsByFeed={incidentsByFeed} escalationsByFeed={escalationsByFeed}
+          onOpenReport={setInspecting} />
 
+        {/* The Streams stay mounted and in the same place in the tree in both
+            layouts. Their <video> elements ARE the decoders — reparenting one
+            remounts it and tears down the hls attachment, and display:none
+            stops it decoding — so in list mode the host is collapsed to a
+            pixel rather than removed, and only the canvas goes away. */}
         <div className="wall-host">
-          <VideoWall streams={wallStreams} statusById={statusById}
-            heroIds={heroIds} hoverId={hoverId} layout={layout}
-            onToggleFocus={onToggleFocus} onFps={onFps} />
+          {!listMode && (
+            <VideoWall streams={wallStreams} statusById={statusById}
+              heroIds={heroIds} hoverId={hoverId} layout={layout}
+              onToggleFocus={onToggleFocus} onFps={onFps} />
+          )}
           <div className="overlays">
             {tiles.map((t) => (
               <Stream key={t.id} id={t.id} label={t.label} src={t.src}
-                fault={faults[t.id] ?? 'none'} box={layout.get(t.id)}
+                fault={faults[t.id] ?? 'none'} box={listMode ? undefined : layout.get(t.id)}
                 isHero={heroIds.includes(t.id)} resolved={!!resolving[t.id]}
+                isHovered={hoverId === t.id}
                 status={statuses[t.id]} showNaive={showNaive}
                 onFrame={onFrame} onIdle={onIdle} onEl={onEl}
                 onFaultChange={onFaultChange} onToggleFocus={onToggleFocus}
@@ -1006,7 +1304,7 @@ export default function App() {
 
             {/* Empty slot — registering a feed happens on the grid, in the
                 position the feed will occupy, rather than in a modal list. */}
-            {layout.get(ADD_SLOT) && (
+            {!listMode && layout.get(ADD_SLOT) && (
               <button className="ov ov--add" style={pct(layout.get(ADD_SLOT)!)}
                 onClick={() => setAdding(true)}
                 title="Register another feed">
@@ -1017,47 +1315,6 @@ export default function App() {
           </div>
         </div>
 
-        <aside className="log">
-          {escalations.length > 0 && (
-            <>
-              <h2>Escalations
-                <button className="log__copy" title="Copy as JSON"
-                  onClick={() => void navigator.clipboard?.writeText(JSON.stringify(escalations, null, 2))}>copy</button>
-              </h2>
-              <ul className="esc">
-                {escalations.map((e) => (
-                  <li key={e.id} className={`esc--${e.severity}`}>
-                    <time>{e.at}</time>
-                    <span className="log__cam">{e.cam}</span>
-                    <span className="esc__sev">{e.severity}</span>
-                    {e.note && <span className="esc__note">{e.note}</span>}
-                    <span className="esc__ev">
-                      {e.evidence.liveness} · stale {(e.evidence.staleMs / 1000).toFixed(1)}s · drift {e.evidence.drift == null ? '–' : e.evidence.drift.toFixed(2)} · dropped {e.evidence.dropped}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </>
-          )}
-          <h2>Incidents</h2>
-          {incidents.length === 0 ? (
-            <p className="log__empty">No signal loss recorded.</p>
-          ) : (
-            <ul>
-              {incidents.map((i, n) => (
-                <li key={n} className={i.kind}>
-                  <time>{i.at}</time>
-                  <span className="log__cam">{i.cam}</span>
-                  <span>{i.text}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-          <p className="log__note">
-            Promote a feed and hit <code>freeze</code> to cut it off at the client, or
-            <code>report incident</code> to escalate with the measurements attached.
-          </p>
-        </aside>
       </div>
 
       {groupsOpen && (
@@ -1080,6 +1337,15 @@ export default function App() {
 
       {reporting && (
         <ReportDialog pending={reporting} onSubmit={submitEscalation} onCancel={() => setReporting(null)} />
+      )}
+
+      {inspecting && tiles.some((t) => t.id === inspecting) && (
+        <FeedReport tile={tiles.find((t) => t.id === inspecting)!}
+          liveness={statuses[inspecting]?.liveness ?? 'idle'}
+          status={statuses[inspecting]}
+          incidents={incidentsByFeed[inspecting] ?? []}
+          escalations={escalationsByFeed[inspecting] ?? []}
+          onClose={() => setInspecting(null)} />
       )}
     </div>
   );
