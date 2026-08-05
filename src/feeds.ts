@@ -151,3 +151,48 @@ export async function probeFeed(url: string, signal?: AbortSignal): Promise<Prob
 
   return { verdict: 'live', ok: true, detail: 'Live, CORS-clean on playlist and segments.' };
 }
+
+// ── catalogue ──────────────────────────────────────────────────────────────
+
+export interface CatalogEntry {
+  label: string;
+  /** Short tile code — explicit, rather than derived from the display name. */
+  code: string;
+  url: string;
+  /** What it is, and anything known about how it behaves. */
+  note: string;
+}
+
+/**
+ * Prefilled feeds, all verified in a browser on 2026-08-05 — live, with CORS on
+ * playlist AND segments. Offered as a starting point so you aren't pasting URLs
+ * to find out which of the public endpoints still work; the probe still runs on
+ * whatever you pick, because these rot.
+ */
+export const FEED_CATALOG: CatalogEntry[] = [
+  {
+    label: 'DW English', code: 'DW-EN',
+    url: 'https://dwamdstream102.akamaized.net/hls/live/2015525/dwstream102/index.m3u8',
+    note: 'Deutsche Welle — live news, real footage, multi-variant',
+  },
+  {
+    label: 'ARD Tagesschau', code: 'TAGESSCHAU',
+    url: 'https://tagesschau.akamaized.net/hls/live/2020115/tagesschau/tagesschau_1/master.m3u8',
+    note: 'German public broadcaster — live news, real footage',
+  },
+  {
+    label: 'Unified Streaming — live', code: 'UNIFIED-A',
+    url: 'https://demo.unified-streaming.com/k8s/live/stable/live.isml/.m3u8',
+    note: 'Colour-bar test pattern with a burned-in clock — useful for verifying staleness by eye',
+  },
+  {
+    label: 'Unified Streaming — SCTE-35', code: 'UNIFIED-B',
+    url: 'https://demo.unified-streaming.com/k8s/live/stable/scte35.isml/.m3u8',
+    note: 'Second test-pattern channel, distinct from the one above',
+  },
+  {
+    label: 'Apple bipbop (VOD — will be rejected)', code: 'BIPBOP',
+    url: 'https://d2zihajmogu5jn.cloudfront.net/bipbop-advanced/bipbop_16x9_variant.m3u8',
+    note: 'Deliberately included: VOD, so the probe rejects it. Shows what a bad feed looks like.',
+  },
+];

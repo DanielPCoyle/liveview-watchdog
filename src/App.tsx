@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import CreatableSelect from 'react-select/creatable';
 import { useTile } from './useTile';
 import { useLongTasks, useJankInjector } from './perf';
 import { VideoWall, computeLayout, VW, VH, type Box, type WallStreamRef } from './VideoWall';
 import type { Fault, FromWorker, Liveness, ToWorker } from './types';
 import {
   loadRegistry, saveRegistry, probeFeed,
-  DEFAULT_REGISTRY, type Registry, type ProbeResult,
+  DEFAULT_REGISTRY, FEED_CATALOG, type Registry, type ProbeResult,
 } from './feeds';
 
 /**
@@ -294,6 +295,35 @@ function GroupPanel(props: {
   );
 }
 
+interface FeedOption { value: string; label: string; note?: string }
+
+const CATALOG_OPTIONS: FeedOption[] = FEED_CATALOG.map((c) => ({
+  value: c.url, label: c.label, note: c.note,
+}));
+
+/**
+ * react-select renders its own DOM, so it needs explicit theming rather than a
+ * stylesheet — otherwise it arrives as a white control in a dark room.
+ */
+const selectStyles = {
+  control: (b: Record<string, unknown>) => ({
+    ...b, background: 'var(--panel-2)', borderColor: 'var(--rule)', borderRadius: 4,
+    minHeight: 34, boxShadow: 'none', fontSize: 12, ':hover': { borderColor: 'var(--muted)' },
+  }),
+  menu: (b: Record<string, unknown>) => ({
+    ...b, background: 'var(--panel)', border: '1px solid var(--rule)', borderRadius: 4, zIndex: 30,
+  }),
+  option: (b: Record<string, unknown>, st: { isFocused: boolean }) => ({
+    ...b, background: st.isFocused ? 'color-mix(in srgb, var(--ink) 12%, transparent)' : 'transparent',
+    color: 'var(--ink)', fontSize: 12, padding: '8px 10px', cursor: 'pointer',
+  }),
+  singleValue: (b: Record<string, unknown>) => ({ ...b, color: 'var(--ink)' }),
+  input: (b: Record<string, unknown>) => ({ ...b, color: 'var(--ink)' }),
+  placeholder: (b: Record<string, unknown>) => ({ ...b, color: 'var(--muted)' }),
+  indicatorSeparator: (b: Record<string, unknown>) => ({ ...b, background: 'var(--rule)' }),
+  dropdownIndicator: (b: Record<string, unknown>) => ({ ...b, color: 'var(--muted)' }),
+} as never;
+
 /**
  * Register one feed. The probe is the point: a URL cannot tell you whether it
  * is live or VOD, whether a master advertises variants that 404, or whether the
@@ -334,11 +364,32 @@ function AddFeedDialog(props: {
           <input value={label} autoFocus placeholder="e.g. LOBBY-01" onChange={(e) => setLabel(e.target.value)} />
         </label>
 
-        <label className="field">
-          <span>HLS URL</span>
-          <input value={src} placeholder="https://…/index.m3u8"
-            onChange={(e) => { setSrc(e.target.value); setProbe(null); }} />
-        </label>
+        <div className="field">
+          <span>Feed</span>
+          <CreatableSelect<FeedOption>
+            options={CATALOG_OPTIONS}
+            styles={selectStyles}
+            classNamePrefix="rs"
+            placeholder="Pick a verified feed, or paste any .m3u8 URL…"
+            formatCreateLabel={(v) => `Use custom URL: ${v}`}
+            isClearable
+            value={src ? (CATALOG_OPTIONS.find((o) => o.value === src) ?? { value: src, label: src }) : null}
+            formatOptionLabel={(o: FeedOption, meta) => (
+              meta.context === 'menu' && o.note
+                ? <div><div>{o.label}</div><div className="rs__note">{o.note}</div></div>
+                : <span>{o.label}</span>
+            )}
+            onChange={(opt) => {
+              setSrc(opt?.value ?? '');
+              setProbe(null);
+              // Prefill the label from the catalogue, but never clobber a typed one.
+              if (opt && !label.trim()) {
+                const known = FEED_CATALOG.find((c) => c.url === opt.value);
+                if (known) setLabel(known.code);
+              }
+            }}
+          />
+        </div>
 
         {probe && (
           <p className={`probe probe--${probe.ok ? 'ok' : 'bad'}`}>

@@ -305,3 +305,7 @@ button.on { background: var(--ink); color: var(--bg); border-color: var(--ink); 
   font-family: var(--mono); font-size: 12px; padding: 8px 9px; border-radius: 4px;
   background: var(--panel-2); color: var(--ink); border: 1px solid var(--rule);
 }
+
+/* react-select renders its own DOM; only the bits styles={} can't reach. */
+.rs__note { font-size: 10px; color: var(--muted); margin-top: 2px; line-height: 1.4; }
+.rs__menu-list { max-height: 260px; }
