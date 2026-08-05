@@ -13,12 +13,19 @@ export interface UseTileArgs {
   id: string;
   src: string;
   fault: Fault;
+  /**
+   * Focused feeds get full quality; wall tiles get pinned to the lowest
+   * rendition. This is the real reason a video wall has a focused view — the
+   * operator only ever studies one feed, so the rest need not cost full
+   * bitrate. Real VMS clients pull a dedicated low-res sub-stream for this.
+   */
+  focused?: boolean;
   /** Heartbeat sink — the worker owns the clock, we only report frames. */
   onFrame: (id: string, at: number, mediaTime: number) => void;
   onIdle: (id: string) => void;
 }
 
-export function useTile({ id, src, fault, onFrame, onIdle }: UseTileArgs) {
+export function useTile({ id, src, fault, focused = false, onFrame, onIdle }: UseTileArgs) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const hlsRef = useRef<Hls | null>(null);
   const intervalsRef = useRef<number[]>([]);
@@ -135,9 +142,13 @@ export function useTile({ id, src, fault, onFrame, onIdle }: UseTileArgs) {
       if (hls) hls.currentLevel = 0;
     } else {
       hls?.startLoad();
-      if (hls) hls.currentLevel = -1;
+      // Quality follows selection (see `focused`). Note: the bundled ffmpeg
+      // cameras emit a SINGLE rendition, so this policy is wired and correct
+      // but has nothing to switch between — point it at a multi-variant source
+      // to see it bite.
+      if (hls) hls.currentLevel = focused ? -1 : 0;
     }
-  }, [fault]);
+  }, [fault, focused]);
 
   const attachRef = useCallback((el: HTMLVideoElement | null) => { videoRef.current = el; }, []);
 

@@ -85,6 +85,37 @@ button.on { background: var(--ink); color: var(--bg); border-color: var(--ink); 
 }
 
 .wall { min-height: 0; min-width: 0; }
+.wall-host { position: relative; min-height: 0; min-width: 0; display: grid; }
+.wall canvas { cursor: pointer; }
+
+/* ── focus view: hero + carousel ────────────────────────────────────────── */
+.focus {
+  display: grid; grid-template-rows: minmax(0, 1fr) auto;
+  gap: 12px; padding: 14px; min-height: 0;
+}
+.focus__hero { position: relative; min-height: 0; display: grid; }
+.focus__hero .tile { display: grid; grid-template-rows: minmax(0, 1fr) auto auto; }
+.focus__hero .tile video { height: 100%; aspect-ratio: auto; }
+
+.focus__strip {
+  display: flex; gap: 10px; overflow-x: auto; overflow-y: hidden;
+  padding-bottom: 4px; scrollbar-width: thin;
+}
+.focus__strip .tile { flex: 0 0 190px; }
+
+.focus__close {
+  position: absolute; top: 10px; right: 10px; z-index: 3;
+  width: 30px; height: 30px; padding: 0; font-size: 14px; line-height: 1;
+  border-radius: 4px; background: color-mix(in srgb, var(--bg) 78%, transparent);
+  border: 1px solid var(--rule); backdrop-filter: blur(3px);
+}
+.focus__close:hover { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.focus__close--wall { top: 14px; right: 14px; }
+
+.tile--grid, .tile--strip { cursor: pointer; }
+.tile--grid:hover, .tile--strip:hover { border-color: color-mix(in srgb, var(--ink) 40%, var(--rule)); }
+.tile--strip .tile__bar { padding: 6px 8px; }
+.tile--strip .tile__label { font-size: 10px; }
 
 /* Decoders stay in the document — display:none would stop decoding — but they
    are never what you look at in GPU mode; the canvas is. */

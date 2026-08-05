@@ -43,6 +43,17 @@ The connection check reports a healthy feed thirty seconds after the camera stop
 | `jank` | A genuine main-thread busy-loop. Real long tasks, real dropped frames. |
 | `low-q` | Pins hls.js to its lowest rendition — real bitrate degradation. |
 
+## Focus view — and why it's not just layout
+
+Click any feed to promote it to a hero view; the rest ease down into a carousel along the bottom. **✕** or **Esc** returns to the grid. Works in both compositors — in GPU mode the click is a raycast into the scene and the transition is position/scale easing in the render loop, not CSS.
+
+The reason a wall has a focused view isn't presentation, it's budget. An operator scans the wall and studies exactly one feed, so the other tiles don't need to cost full rate or full bitrate. Selection therefore drives policy:
+
+- the focused feed uploads its texture **every frame**; strip tiles stay rate-capped
+- the focused feed requests full quality (`hls.currentLevel = -1`); the rest are pinned to the lowest rendition
+
+That second one is wired and correct but **has nothing to bite on here** — the bundled ffmpeg cameras emit a single rendition. Point it at a multi-variant source to see it work. Flagging that rather than letting the code imply a benefit it can't currently demonstrate.
+
 ## Sources are genuinely live — and that mattered
 
 `scripts/cameras.sh` generates local live HLS with ffmpeg: 1s segments, a 4-segment sliding window, no `EXT-X-ENDLIST`, and a **wall-clock timecode burned into the picture** so a stale tile is visible to the eye, not only to the instrumentation.

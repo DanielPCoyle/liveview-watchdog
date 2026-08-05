@@ -34,15 +34,27 @@ function Tile(props: {
   onIdle: (id: string) => void;
   onFaultChange: (id: string, f: Fault) => void;
   showNaiveOnly: boolean;
+  focused?: boolean;
+  variant?: 'grid' | 'hero' | 'strip';
+  onSelect?: (id: string) => void;
 }) {
   const { attachRef, naive, stats } = useTile({
-    id: props.id, src: props.src, fault: props.fault, onFrame: props.onFrame, onIdle: props.onIdle,
+    id: props.id, src: props.src, fault: props.fault, focused: props.focused,
+    onFrame: props.onFrame, onIdle: props.onIdle,
   });
   const st = props.status;
   const liveness = st?.liveness ?? 'idle';
+  const variant = props.variant ?? 'grid';
 
   return (
-    <div className={`tile tile--${props.showNaiveOnly ? naive : liveness}`}>
+    <div
+      className={`tile tile--${variant} tile--${props.showNaiveOnly ? naive : liveness}`}
+      onClick={variant === 'hero' ? undefined : () => props.onSelect?.(props.id)}
+      role={variant === 'hero' ? undefined : 'button'}
+      tabIndex={variant === 'hero' ? undefined : 0}
+      onKeyDown={variant === 'hero' ? undefined : (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); props.onSelect?.(props.id); } }}
+      title={variant === 'hero' ? undefined : 'Open this feed'}
+    >
       <video ref={attachRef} muted playsInline />
       <div className="tile__bar">
         <span className="tile__label">{props.label}</span>
@@ -56,7 +68,7 @@ function Tile(props: {
         )}
       </div>
 
-      {!props.showNaiveOnly && (
+      {!props.showNaiveOnly && variant !== 'strip' && (
         <dl className="tile__stats">
           <div><dt>interval p50/p95</dt><dd>{stats.p50IntervalMs ?? '–'} / {stats.p95IntervalMs ?? '–'} ms</dd></div>
           <div><dt>decoded</dt><dd>{stats.totalFrames}</dd></div>
@@ -67,26 +79,30 @@ function Tile(props: {
         </dl>
       )}
 
-      <div className="tile__faults">
-        {(['none', 'freeze', 'lowQuality'] as Fault[]).map((f) => (
-          <button key={f} className={props.fault === f ? 'on' : ''} onClick={() => props.onFaultChange(props.id, f)}>
-            {f === 'none' ? 'healthy' : f === 'freeze' ? 'freeze' : 'low-q'}
-          </button>
-        ))}
-      </div>
+      {variant !== 'strip' && (
+        <div className="tile__faults">
+          {(['none', 'freeze', 'lowQuality'] as Fault[]).map((f) => (
+            <button key={f} className={props.fault === f ? 'on' : ''}
+              onClick={(e) => { e.stopPropagation(); props.onFaultChange(props.id, f); }}>
+              {f === 'none' ? 'healthy' : f === 'freeze' ? 'freeze' : 'low-q'}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
 // ── WebGL presentation: video decodes offscreen, GPU composites the wall ───
 function WallStream(props: {
-  id: string; src: string; fault: Fault;
+  id: string; src: string; fault: Fault; focused?: boolean;
   onFrame: (id: string, at: number, mediaTime: number) => void;
   onIdle: (id: string) => void;
   onEl: (id: string, el: HTMLVideoElement | null) => void;
 }) {
   const { attachRef } = useTile({
-    id: props.id, src: props.src, fault: props.fault, onFrame: props.onFrame, onIdle: props.onIdle,
+    id: props.id, src: props.src, fault: props.fault, focused: props.focused,
+    onFrame: props.onFrame, onIdle: props.onIdle,
   });
   const { onEl, id } = props;
   const ref = useCallback((el: HTMLVideoElement | null) => { attachRef(el); onEl(id, el); }, [attachRef, onEl, id]);
@@ -103,6 +119,7 @@ export default function App() {
   const [mode, setMode] = useState<Mode>('dom');
   const [wallFps, setWallFps] = useState(0);
   const [elVersion, setElVersion] = useState(0);
+  const [focusedId, setFocusedId] = useState<string | null>(null);
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [clock, setClock] = useState(() => new Date().toLocaleTimeString());
 
@@ -183,6 +200,21 @@ export default function App() {
     setElVersion((v) => v + 1);
   }, []);
   const onFps = useCallback((f: number) => setWallFps(f), []);
+  const onFocus = useCallback((id: string | null) => setFocusedId(id), []);
+
+  // Escape always returns to the grid — an operator shouldn't have to find a
+  // close button to get their whole wall back.
+  useEffect(() => {
+    if (!focusedId) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setFocusedId(null); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [focusedId]);
+
+  // A feed that vanishes (wall resized smaller) must not stay focused.
+  useEffect(() => {
+    if (focusedId && !tiles.some((t) => t.id === focusedId)) setFocusedId(null);
+  }, [tiles, focusedId]);
 
   const wallStreams: WallStreamRef[] = useMemo(
     () => tiles.map((t) => ({ id: t.id, el: elsRef.current[t.id] ?? null })),
@@ -243,24 +275,51 @@ export default function App() {
 
       <div className="stage">
         {mode === 'dom' ? (
-          <main className="grid">
-            {tiles.map((t) => (
-              <Tile key={t.id} id={t.id} label={t.label} src={t.src}
-                fault={faults[t.id] ?? 'none'} status={statuses[t.id]}
-                onFrame={onFrame} onIdle={onIdle} onFaultChange={onFaultChange}
-                showNaiveOnly={showNaiveOnly} />
-            ))}
-          </main>
+          focusedId ? (
+            <main className="focus">
+              <div className="focus__hero">
+                {tiles.filter((t) => t.id === focusedId).map((t) => (
+                  <Tile key={t.id} id={t.id} label={t.label} src={t.src} variant="hero" focused
+                    fault={faults[t.id] ?? 'none'} status={statuses[t.id]}
+                    onFrame={onFrame} onIdle={onIdle} onFaultChange={onFaultChange}
+                    showNaiveOnly={showNaiveOnly} />
+                ))}
+                <button className="focus__close" onClick={() => setFocusedId(null)} aria-label="Back to grid (Esc)">✕</button>
+              </div>
+              <div className="focus__strip">
+                {tiles.filter((t) => t.id !== focusedId).map((t) => (
+                  <Tile key={t.id} id={t.id} label={t.label} src={t.src} variant="strip"
+                    fault={faults[t.id] ?? 'none'} status={statuses[t.id]}
+                    onFrame={onFrame} onIdle={onIdle} onFaultChange={onFaultChange}
+                    showNaiveOnly={showNaiveOnly} onSelect={setFocusedId} />
+                ))}
+              </div>
+            </main>
+          ) : (
+            <main className="grid">
+              {tiles.map((t) => (
+                <Tile key={t.id} id={t.id} label={t.label} src={t.src} variant="grid"
+                  fault={faults[t.id] ?? 'none'} status={statuses[t.id]}
+                  onFrame={onFrame} onIdle={onIdle} onFaultChange={onFaultChange}
+                  showNaiveOnly={showNaiveOnly} onSelect={setFocusedId} />
+              ))}
+            </main>
+          )
         ) : (
-          <>
+          <div className="wall-host">
             <div className="decode-pool" aria-hidden>
               {tiles.map((t) => (
                 <WallStream key={t.id} id={t.id} src={t.src} fault={faults[t.id] ?? 'none'}
+                  focused={focusedId === t.id}
                   onFrame={onFrame} onIdle={onIdle} onEl={onEl} />
               ))}
             </div>
-            <VideoWall streams={wallStreams} statusById={statusById} onFps={onFps} />
-          </>
+            <VideoWall streams={wallStreams} statusById={statusById}
+              focusedId={focusedId} onFocus={onFocus} onFps={onFps} />
+            {focusedId && (
+              <button className="focus__close focus__close--wall" onClick={() => setFocusedId(null)} aria-label="Back to grid (Esc)">✕</button>
+            )}
+          </div>
         )}
 
         <aside className="log">
