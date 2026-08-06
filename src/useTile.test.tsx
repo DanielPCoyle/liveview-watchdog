@@ -42,6 +42,20 @@ class FakeHls {
 
 mock.module('hls.js', () => ({ default: FakeHls }));
 
+/** Drive `getVideoPlaybackQuality` so the decode-poll path has something to see. */
+function decodeFrames(perTick: number, dropped = 0) {
+  let total = 0;
+  (HTMLMediaElement.prototype as unknown as { getVideoPlaybackQuality: () => unknown })
+    .getVideoPlaybackQuality = () => {
+      total += perTick;
+      return { totalVideoFrames: total, droppedVideoFrames: dropped };
+    };
+}
+function stopDecoding() {
+  (HTMLMediaElement.prototype as unknown as { getVideoPlaybackQuality: () => unknown })
+    .getVideoPlaybackQuality = () => ({ totalVideoFrames: 0, droppedVideoFrames: 0 });
+}
+
 const { useTile } = await import('./useTile');
 
 /** Mounts a tile and returns its hls instance plus the element. */
@@ -59,8 +73,8 @@ function mountTile(props: Partial<Parameters<typeof useTile>[0]> = {}) {
   return { view, get hls() { return FakeHls.instances.at(-1)!; }, get api() { return api!; } };
 }
 
-beforeEach(() => { FakeHls.instances = []; });
-afterEach(cleanup);
+beforeEach(() => { FakeHls.instances = []; FakeHls.isSupported = () => true; });
+afterEach(() => { cleanup(); stopDecoding(); });
 
 describe('useTile with a real transport', () => {
   test('attaches hls to the element and loads the source', async () => {
@@ -182,5 +196,65 @@ describe('useTile with a mock source', () => {
     await waitFor(() => expect(frames.length).toBeGreaterThan(3), { timeout: 2000 });
     const media = frames.map((f) => f.media);
     expect(media.every((m) => m === media[0])).toBe(true);
+  });
+});
+
+
+describe('the decode heartbeat', () => {
+  /**
+   * The real feed path: liveness comes from decoded frames, polled from
+   * getVideoPlaybackQuality. The mock path bypasses this entirely, so without
+   * these the heartbeat that every live camera depends on is untested.
+   */
+  test('advancing decoded frames produce a heartbeat carrying wall-clock time', async () => {
+    decodeFrames(3);
+    const beats: Array<{ id: string; at: number }> = [];
+    mountTile({ onFrame: (id: string, at: number) => beats.push({ id, at }) });
+    await waitFor(() => expect(beats.length).toBeGreaterThan(1), { timeout: 2000 });
+    expect(beats[0].id).toBe('t1');
+    // Date.now(), not performance.now() — the worker compares against its own
+    // clock, and the two origins differ. This is the bug that read "-2.6s".
+    expect(beats[0].at).toBeGreaterThan(1e12);
+  });
+
+  test('a decoder stuck at the same frame count emits no heartbeat at all', async () => {
+    stopDecoding();
+    const beats: number[] = [];
+    mountTile({ onFrame: (_i: string, at: number) => beats.push(at) });
+    await new Promise((r) => setTimeout(r, 600));
+    expect(beats.length).toBe(0);
+  });
+
+  test('stats are published on their own cadence, including a dropped-frame rate', async () => {
+    decodeFrames(4, 2);
+    const t = mountTile();
+    await waitFor(() => expect(t.api.stats.totalFrames).toBeGreaterThan(0), { timeout: 2000 });
+    expect(t.api.stats.droppedFrames).toBe(2);
+    expect(t.api.stats.droppedPct).toBeGreaterThan(0);
+    expect(t.api.stats.p50IntervalMs).not.toBeNull();
+  });
+
+  test('the naive check reports connected once the manifest parses and playback starts', async () => {
+    decodeFrames(3);
+    const t = mountTile();
+    await waitFor(() => expect(FakeHls.instances.length).toBe(1));
+    // hls.js starts playback on MANIFEST_PARSED; without it the element is
+    // legitimately still paused, and the naive check correctly says idle.
+    expect(t.api.naive).toBe('idle');
+    t.hls.fire('manifestParsed', {});
+    await waitFor(() => expect(t.api.naive).toBe('connected'), { timeout: 2000 });
+  });
+});
+
+describe('browsers without Media Source Extensions', () => {
+  test('falls back to native HLS playback rather than failing', async () => {
+    FakeHls.isSupported = () => false;
+    HTMLMediaElement.prototype.canPlayType = () => 'maybe';
+    const t = mountTile({ src: 'https://example.test/native.m3u8' });
+    await new Promise((r) => setTimeout(r, 50));
+    // No hls.js instance, and the element was pointed at the source directly.
+    expect(FakeHls.instances.length).toBe(0);
+    expect(t.view.container.querySelector('video')!.getAttribute('src'))
+      .toBe('https://example.test/native.m3u8');
   });
 });

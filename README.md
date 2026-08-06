@@ -196,7 +196,7 @@ Full reasoning in [ADR-0008](docs/adr/0008-hermetic-e2e-real-smoke.md).
 
 **Production smoke (3 tests, every 6 hours)** — runs against the real deployment and asserts a real camera is advancing frames. Deliberately not a `curl` of index.html. Tolerance is deliberate: a single dead municipal camera is not an alert, *nothing* alive is.
 
-**Floors are enforced at 85%** for lines and functions (`bunfig.toml`), so CI fails on a regression rather than letting coverage erode quietly. `main.tsx` is excluded as bootstrap, along with the test harness itself.
+**Floors are enforced per file, not on the average** (`bunfig.toml`): 85% lines, 75% functions, so no single module can rot behind a healthy total. Function coverage is gated lower on purpose — much of what that metric counts here are inline JSX handlers that the end-to-end suite drives in a real browser but nothing invokes directly in a unit test, and gating on a number I would have had to bend is worse than gating on the one that is genuinely met. The gate is verified to bite: raising the line floor to 90% fails on `App.tsx`. `main.tsx` is excluded as bootstrap, along with the type-only module and the test harness.
 
 ### The mock seam
 
@@ -208,8 +208,8 @@ Freezing a mock **does not stop its heartbeat**. Frames stopping is the easy cas
 
 | Workflow | Trigger | What it gates |
 |---|---|---|
-| `ci.yml` | push / PR | Typecheck (strict, `noUnusedLocals`), tests + 85% coverage floors, production build |
-| `e2e.yml` | push / PR | The hermetic Playwright suite against a real build |
+| `ci.yml` | push / PR / manual | Typecheck (strict, `noUnusedLocals`), tests + per-file coverage floors, production build |
+| `e2e.yml` | push / PR / manual | The hermetic Playwright suite against a real build |
 | `smoke.yml` | every 6h + manual | Frames advancing on the live deployment |
 
 ## Deployment

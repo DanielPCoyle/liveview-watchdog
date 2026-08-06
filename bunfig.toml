@@ -9,8 +9,16 @@ coverageSkipTestFiles = true
 #                 render, with no logic to assert on.
 #   test-setup    the harness itself.
 #   three-stub    a test double for three.js, not shipped code.
-coveragePathIgnorePatterns = ["src/main.tsx", "src/test-setup.ts", "src/three-stub.ts"]
+coveragePathIgnorePatterns = ["src/main.tsx", "src/test-setup.ts", "src/three-stub.ts", "src/types.ts"]
 
-# The floor the suite must hold. Set from what the tests actually reach today,
-# so a regression fails CI rather than quietly eroding.
-coverageThreshold = { lines = 0.85, functions = 0.85 }
+# The floor the suite must hold, enforced PER FILE by bun rather than on the
+# total, so no single module can rot behind a healthy average.
+#
+# Both metrics must be stated: bun treats an omitted one as 100%, which fails
+# silently and looks like a broken gate.
+#
+# Lines sit at 85 (every file is at least 89). Functions sit lower at 75
+# because much of what that metric counts here are inline JSX handlers, which
+# the end-to-end suite exercises in a real browser but nothing invokes directly
+# in a unit test. Verified to bite: raising lines to 0.90 fails on App.tsx.
+coverageThreshold = { lines = 0.85, functions = 0.75 }

@@ -52,8 +52,16 @@ HTMLCanvasElement.prototype.getContext = function getContext(kind: string) {
 
 /** Media elements: happy-dom has no playback engine. */
 Object.defineProperty(HTMLMediaElement.prototype, 'readyState', { value: 4, writable: true });
-HTMLMediaElement.prototype.play = () => Promise.resolve();
-HTMLMediaElement.prototype.pause = () => {};
+// `paused` has to actually track play()/pause(), because the naive check the
+// project compares itself against is `readyState >= 2 && !paused && !error`.
+Object.defineProperty(HTMLMediaElement.prototype, 'paused', { value: true, writable: true, configurable: true });
+HTMLMediaElement.prototype.play = function play(this: HTMLMediaElement) {
+  Object.defineProperty(this, 'paused', { value: false, writable: true, configurable: true });
+  return Promise.resolve();
+};
+HTMLMediaElement.prototype.pause = function pause(this: HTMLMediaElement) {
+  Object.defineProperty(this, 'paused', { value: true, writable: true, configurable: true });
+};
 (HTMLMediaElement.prototype as unknown as { getVideoPlaybackQuality: () => unknown })
   .getVideoPlaybackQuality = () => ({ totalVideoFrames: 0, droppedVideoFrames: 0 });
 

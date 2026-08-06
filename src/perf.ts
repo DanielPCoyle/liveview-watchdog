@@ -37,19 +37,3 @@ export function useLongTasks(): PerfSnapshot {
 
   return snap;
 }
-
-/**
- * Genuinely block the main thread. Not a simulation of jank — actual jank, so
- * the long-task numbers and the dropped-frame gap are real.
- */
-export function useJankInjector(enabled: boolean, blockMs = 180, everyMs = 300) {
-  useEffect(() => {
-    if (!enabled) return;
-    const t = window.setInterval(() => {
-      const end = performance.now() + blockMs;
-      // eslint-disable-next-line no-empty
-      while (performance.now() < end) {}
-    }, everyMs);
-    return () => window.clearInterval(t);
-  }, [enabled, blockMs, everyMs]);
-}
