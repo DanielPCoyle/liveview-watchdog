@@ -3,7 +3,18 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
     <title>Liveview Watchdog — proving a live tile is actually live</title>
+    <meta
+      name="description"
+      content="A live-video wall that tells a working feed from a dead one and proves it: liveness measured from frame advancement rather than connection state, composited on the GPU, with the watchdog running off the main thread."
+    />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+
+    <!-- The camera origins are contacted immediately after the shell paints;
+         the handshake is worth starting now rather than after the bundle runs. -->
+    <link rel="preconnect" href="https://wzmedia.dot.ca.gov" crossorigin />
+    <link rel="dns-prefetch" href="https://wzmedia.dot.ca.gov" />
   </head>
   <body>
     <div id="root"></div>

@@ -9,7 +9,8 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { cleanup, render } from '@testing-library/react';
 import * as threeStub from './three-stub';
-import { VideoWall, computeLayout } from './VideoWall';
+import { VideoWall } from './VideoWall';
+import { computeLayout } from './layout';
 
 function makeVideo(): HTMLVideoElement {
   const v = document.createElement('video');

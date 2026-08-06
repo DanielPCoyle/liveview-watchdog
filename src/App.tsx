@@ -1,15 +1,21 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import CreatableSelect from 'react-select/creatable';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTile } from './useTile';
 import { useLongTasks } from './perf';
 import { captureError, track } from './telemetry';
-import { VideoWall, computeLayout, emphasize, VW, VH, type Box, type WallStreamRef } from './VideoWall';
+import { computeLayout, emphasize, VW, VH, type Box, type WallStreamRef } from './layout';
+
+/**
+ * The compositor and the feed dialog are loaded on demand.
+ *
+ * three.js is the single largest dependency here and a narrow viewport never
+ * mounts it at all; react-select is only reachable once you open the add-feed
+ * dialog. Neither belongs in the bundle that has to paint the wall.
+ */
+const VideoWall = lazy(() => import('./VideoWall').then((m) => ({ default: m.VideoWall })));
+const FeedDialog = lazy(() => import('./FeedDialog'));
 import type { Fault, FromWorker, Liveness, StaleReason, ToWorker } from './types';
 import { createSync, type SyncDriver, type SyncMode } from './sync';
-import {
-  loadRegistry, probeFeed,
-  DEFAULT_REGISTRY, FEED_CATALOG, type Registry, type ProbeResult,
-} from './feeds';
+import { loadRegistry, DEFAULT_REGISTRY, FEED_CATALOG, type Registry } from './feeds';
 
 /**
  * Local live-HLS cameras from `scripts/cameras.sh` — genuinely live: sliding
@@ -64,6 +70,9 @@ interface WorkerStatus { liveness: Liveness; staleMs: number; drift: number | nu
  * before it is treated as an event.
  */
 const CONFIRM_TICKS = 12;
+
+/** Gap between bringing successive feeds online — see `mountLimit`. */
+const STAGGER_MS = 120;
 /**
  * `feedId` as well as `cam`: labels are neither unique nor stable — two feeds
  * can carry the same name and editing one renames it — so grouping a feed's own
@@ -337,135 +346,6 @@ function GroupPanel(props: {
           <button type="button" className="on" onClick={props.onClose}>done</button>
         </div>
       </div>
-    </div>
-  );
-}
-
-interface FeedOption { value: string; label: string; note?: string }
-
-const CATALOG_OPTIONS: FeedOption[] = FEED_CATALOG.map((c) => ({
-  value: c.url, label: c.label, note: c.note,
-}));
-
-/**
- * react-select renders its own DOM, so it needs explicit theming rather than a
- * stylesheet — otherwise it arrives as a white control in a dark room.
- */
-const selectStyles = {
-  control: (b: Record<string, unknown>) => ({
-    ...b, background: 'var(--panel-2)', borderColor: 'var(--rule)', borderRadius: 4,
-    minHeight: 34, boxShadow: 'none', fontSize: 12, ':hover': { borderColor: 'var(--muted)' },
-  }),
-  menu: (b: Record<string, unknown>) => ({
-    ...b, background: 'var(--panel)', border: '1px solid var(--rule)', borderRadius: 4, zIndex: 30,
-  }),
-  option: (b: Record<string, unknown>, st: { isFocused: boolean }) => ({
-    ...b, background: st.isFocused ? 'color-mix(in srgb, var(--ink) 12%, transparent)' : 'transparent',
-    color: 'var(--ink)', fontSize: 12, padding: '8px 10px', cursor: 'pointer',
-  }),
-  singleValue: (b: Record<string, unknown>) => ({ ...b, color: 'var(--ink)' }),
-  input: (b: Record<string, unknown>) => ({ ...b, color: 'var(--ink)' }),
-  placeholder: (b: Record<string, unknown>) => ({ ...b, color: 'var(--muted)' }),
-  indicatorSeparator: (b: Record<string, unknown>) => ({ ...b, background: 'var(--rule)' }),
-  dropdownIndicator: (b: Record<string, unknown>) => ({ ...b, color: 'var(--muted)' }),
-} as never;
-
-/**
- * Register one feed. The probe is the point: a URL cannot tell you whether it
- * is live or VOD, whether a master advertises variants that 404, or whether the
- * SEGMENTS are CORS-enabled as well as the playlist — and each of those fails
- * confusingly later rather than here.
- */
-function FeedDialog(props: {
-  groupName: string;
-  /** Present when editing an existing feed rather than registering a new one. */
-  initial?: { label: string; src: string };
-  onSave: (label: string, src: string) => void;
-  onCancel: () => void;
-}) {
-  const [label, setLabel] = useState(props.initial?.label ?? '');
-  const [src, setSrc] = useState(props.initial?.src ?? '');
-  const [probing, setProbing] = useState(false);
-  const [probe, setProbe] = useState<ProbeResult | null>(null);
-
-  // An unchanged source was already vetted when it was registered, so a rename
-  // does not have to re-probe. Point it somewhere new and it does.
-  const srcUnchanged = props.initial != null && src.trim() === props.initial.src;
-  const canSave = (probe?.ok || srcUnchanged) && !!src.trim();
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') props.onCancel(); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [props]);
-
-  const check = async () => {
-    if (!src.trim()) return;
-    setProbing(true); setProbe(null);
-    setProbe(await probeFeed(src.trim()));
-    setProbing(false);
-  };
-
-  return (
-    <div className="modal" role="dialog" aria-modal="true"
-      aria-label={props.initial ? 'Edit feed' : 'Add feed'}
-      onClick={(e) => { if (e.target === e.currentTarget) props.onCancel(); }}>
-      <form className="modal__panel" onSubmit={(e) => { e.preventDefault(); if (canSave) props.onSave(label, src); }}>
-        <h2>{props.initial ? `Edit “${props.initial.label}”` : `Add feed to “${props.groupName}”`}</h2>
-
-        <label className="field">
-          <span>Label</span>
-          <input value={label} autoFocus placeholder="e.g. LOBBY-01" onChange={(e) => setLabel(e.target.value)} />
-        </label>
-
-        <div className="field">
-          <span>Feed</span>
-          <CreatableSelect<FeedOption>
-            options={CATALOG_OPTIONS}
-            styles={selectStyles}
-            classNamePrefix="rs"
-            placeholder="Pick a verified feed, or paste any .m3u8 URL…"
-            formatCreateLabel={(v) => `Use custom URL: ${v}`}
-            isClearable
-            value={src ? (CATALOG_OPTIONS.find((o) => o.value === src) ?? { value: src, label: src }) : null}
-            formatOptionLabel={(o: FeedOption, meta) => (
-              meta.context === 'menu' && o.note
-                ? <div><div>{o.label}</div><div className="rs__note">{o.note}</div></div>
-                : <span>{o.label}</span>
-            )}
-            onChange={(opt) => {
-              setSrc(opt?.value ?? '');
-              setProbe(null);
-              // Prefill the label from the catalogue, but never clobber a typed one.
-              if (opt && !label.trim()) {
-                const known = FEED_CATALOG.find((c) => c.url === opt.value);
-                if (known) setLabel(known.code);
-              }
-            }}
-          />
-        </div>
-
-        {probe && (
-          <p className={`probe probe--${probe.ok ? 'ok' : 'bad'}`}>
-            <strong>{probe.verdict}</strong> — {probe.detail}
-          </p>
-        )}
-
-        <div className="modal__actions">
-          <button type="button" onClick={props.onCancel}>Cancel</button>
-          <button type="button" onClick={check} disabled={!src.trim() || probing}>
-            {probing ? 'checking…' : 'check'}
-          </button>
-          {probe && !probe.ok && (
-            <button type="button" onClick={() => props.onSave(label, src)}>
-              {props.initial ? 'save anyway' : 'add anyway'}
-            </button>
-          )}
-          <button type="submit" className="on" disabled={!canSave}>
-            {props.initial ? 'save' : 'add'}
-          </button>
-        </div>
-      </form>
     </div>
   );
 }
@@ -915,6 +795,17 @@ export default function App() {
   const [reportReq, setReportReq] = useState<{ id: string; n: number } | null>(null);
 
   const listMode = useListMode();
+
+  /**
+   * Attach decoders one at a time rather than all at once.
+   *
+   * Decode is this project's documented ceiling, and starting every feed in the
+   * same tick is the worst way to spend it: four hls.js instances parsing
+   * manifests and demuxing simultaneously block the thread the watchdog is
+   * trying to measure, and the wall paints nothing until they are done. Feeds
+   * come up in sequence instead — the first immediately, the rest close behind.
+   */
+  const [mountLimit, setMountLimit] = useState(1);
   const workerRef = useRef<Worker | null>(null);
   const elsRef = useRef<Record<string, HTMLVideoElement | null>>({});
   const prevLiveness = useRef<Record<string, Liveness>>({});
@@ -1114,6 +1005,19 @@ export default function App() {
     return tiles.filter((t) => set.has(t.id)).map((t) => t.id);   // stable order
   }, [manualIds, autoPromote, staleIds, resolving, tiles, ignored]);
 
+  useEffect(() => {
+    if (mountLimit >= tiles.length) return;
+    const t = window.setTimeout(() => setMountLimit((n) => n + 1), STAGGER_MS);
+    return () => window.clearTimeout(t);
+  }, [mountLimit, tiles.length]);
+
+  // Shrinking the group must not leave the limit stranded above it.
+  useEffect(() => {
+    if (tiles.length && mountLimit > tiles.length) setMountLimit(tiles.length);
+  }, [tiles.length, mountLimit]);
+
+  const mounted = useMemo(() => tiles.slice(0, mountLimit), [tiles, mountLimit]);
+
   const heroKey = heroIds.join(',');
   // The empty "add feed" slot occupies a real grid position, so it is part of
   // the layout rather than floated on top of it.
@@ -1254,9 +1158,9 @@ export default function App() {
   }, [reporting]);
 
   const wallStreams: WallStreamRef[] = useMemo(
-    () => tiles.map((t) => ({ id: t.id, el: elsRef.current[t.id] ?? null })),
+    () => mounted.map((t) => ({ id: t.id, el: elsRef.current[t.id] ?? null })),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tiles, elVersion],
+    [mounted, elVersion],
   );
 
   const incidentsByFeed = useMemo(() => {
@@ -1374,12 +1278,14 @@ export default function App() {
             pixel rather than removed, and only the canvas goes away. */}
         <div className="wall-host">
           {!listMode && (
-            <VideoWall streams={wallStreams} statusById={statusById}
-              heroIds={heroIds} hoverId={hoverId} layout={layout}
-              onToggleFocus={onToggleFocus} onFps={onFps} />
+            <Suspense fallback={null}>
+              <VideoWall streams={wallStreams} statusById={statusById}
+                heroIds={heroIds} hoverId={hoverId} layout={layout}
+                onToggleFocus={onToggleFocus} onFps={onFps} />
+            </Suspense>
           )}
           <div className="overlays">
-            {tiles.map((t) => (
+            {mounted.map((t) => (
               <Stream key={t.id} id={t.id} label={t.label} src={t.src}
                 fault={faults[t.id] ?? 'none'} box={listMode ? undefined : layout.get(t.id)}
                 isHero={heroIds.includes(t.id)} resolved={!!resolving[t.id]}
@@ -1413,17 +1319,17 @@ export default function App() {
       )}
 
       {adding && (
-        <FeedDialog groupName={registry.groups.find((g) => g.id === activeGroup)?.name ?? ''}
-          onSave={addFeed} onCancel={() => setAdding(false)} />
+        <Suspense fallback={null}><FeedDialog groupName={registry.groups.find((g) => g.id === activeGroup)?.name ?? ''}
+          onSave={addFeed} onCancel={() => setAdding(false)} /></Suspense>
       )}
 
       {editing && registry.feeds.some((f) => f.id === editing) && (
-        <FeedDialog groupName={registry.groups.find((g) => g.id === activeGroup)?.name ?? ''}
+        <Suspense fallback={null}><FeedDialog groupName={registry.groups.find((g) => g.id === activeGroup)?.name ?? ''}
           initial={(() => {
             const f = registry.feeds.find((x) => x.id === editing)!;
             return { label: f.label, src: f.src };
           })()}
-          onSave={editFeed} onCancel={() => setEditing(null)} />
+          onSave={editFeed} onCancel={() => setEditing(null)} /></Suspense>
       )}
 
       {reporting && (

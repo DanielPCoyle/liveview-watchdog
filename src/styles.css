@@ -392,7 +392,7 @@ button.on { background: var(--ink); color: var(--bg); border-color: var(--ink); 
 }
 .roster__inc time { font-variant-numeric: tabular-nums; flex: none; }
 .roster__inc-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.roster__inc-none { flex: 1; opacity: .65; }
+.roster__inc-none { flex: 1; color: var(--ink); opacity: .58; }
 .roster__inc-icon { display: flex; }
 .roster__inc-icon.lost { color: var(--bad); }
 .roster__inc-icon.restored { color: var(--ok-ink); }

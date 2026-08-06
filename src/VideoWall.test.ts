@@ -7,7 +7,7 @@
  * looks deliberate, so a bad clamp survives a manual look at the app.
  */
 import { expect, test } from 'bun:test';
-import { computeLayout, emphasize, EMPHASIS, VW, VH } from './VideoWall';
+import { computeLayout, emphasize, EMPHASIS, VW, VH } from './layout';
 
 const inside = (b: { x: number; y: number; w: number; h: number }) =>
   b.x - b.w / 2 >= -0.001 && b.x + b.w / 2 <= VW + 0.001 &&
