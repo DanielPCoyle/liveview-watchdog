@@ -31,7 +31,8 @@ export type TrackedEvent =
   | 'signal_lost'
   | 'signal_restored'
   | 'escalation_submitted'
-  | 'report_opened';
+  | 'report_opened'
+  | 'wall_started';
 
 export async function initTelemetry() {
   const dsn = import.meta.env.VITE_SENTRY_DSN as string | undefined;

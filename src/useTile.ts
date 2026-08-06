@@ -1,6 +1,17 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import Hls from 'hls.js';
 import { captureError } from './telemetry';
+
+/**
+ * hls.js is fetched when a feed actually attaches, not when the app loads.
+ *
+ * Nothing decodes until the operator starts the wall, so ~200kb of demuxer has
+ * no business being in the bundle that paints the shell. Cached after the first
+ * feed, so the stagger only pays for it once.
+ */
+type HlsModule = typeof import('hls.js');
+type HlsInstance = InstanceType<HlsModule['default']>;
+let hlsModule: Promise<HlsModule> | null = null;
+const loadHls = () => (hlsModule ??= import('hls.js'));
 import type { Fault, NaiveState, TileStats } from './types';
 
 const MAX_INTERVALS = 300;
@@ -36,13 +47,19 @@ export interface UseTileArgs {
 
 export function useTile({ id, src, fault, focused = false, audible = false, onFrame, onIdle }: UseTileArgs) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const hlsRef = useRef<Hls | null>(null);
+  const hlsRef = useRef<HlsInstance | null>(null);
   /** The ERROR handler is bound once at attach; the fault changes under it. */
   const faultRef = useRef<Fault>(fault);
   const intervalsRef = useRef<number[]>([]);
   const lastNowRef = useRef<number | null>(null);
   const observedRef = useRef(0);
 
+  /**
+   * Bumped once the decoder exists. The fault and quality effect runs on mount,
+   * but the transport now arrives asynchronously — without this, a feed mounted
+   * already frozen or already focused would never have that applied.
+   */
+  const [hlsReady, setHlsReady] = useState(0);
   const [naive, setNaive] = useState<NaiveState>('idle');
   const [stats, setStats] = useState<Pick<TileStats, 'observedFrames' | 'totalFrames' | 'droppedFrames' | 'droppedPct' | 'p50IntervalMs' | 'p95IntervalMs'>>({
     observedFrames: 0, totalFrames: 0, droppedFrames: 0, droppedPct: null, p50IntervalMs: null, p95IntervalMs: null,
@@ -142,6 +159,12 @@ export function useTile({ id, src, fault, focused = false, audible = false, onFr
       };
     }
 
+    void loadHls().then(({ default: Hls }) => {
+      if (disposed) return;
+      attachHls(Hls, v);
+    }).catch((err) => captureError(err, { where: 'hls.load', feed: id }));
+
+    function attachHls(Hls: HlsModule['default'], v: HTMLVideoElement) {
     if (Hls.isSupported()) {
       // Small forward buffer: what a genuinely live view runs for latency, and
       // it makes a stalled feed manifest in seconds rather than after a minute
@@ -154,6 +177,7 @@ export function useTile({ id, src, fault, focused = false, audible = false, onFr
         backBufferLength: 4,
       });
       hlsRef.current = hls;
+      setHlsReady((n) => n + 1);
       hls.on(Hls.Events.MANIFEST_PARSED, () => { void v.play().catch(() => {}); refreshNaive(); });
 
       /**
@@ -214,6 +238,7 @@ export function useTile({ id, src, fault, focused = false, audible = false, onFr
     } else if (v.canPlayType('application/vnd.apple.mpegurl')) {
       v.src = src;
       void v.play().catch(() => {});
+    }
     }
 
     const evts = ['playing', 'pause', 'waiting', 'error', 'stalled', 'canplay'] as const;
@@ -309,7 +334,7 @@ export function useTile({ id, src, fault, focused = false, audible = false, onFr
       // to see it bite.
       if (hls) hls.currentLevel = focused ? -1 : 0;
     }
-  }, [fault, focused]);
+  }, [fault, focused, hlsReady]);
 
   // Autoplay requires muted, so every feed starts muted and audio is opt-in.
   // Unmuting is driven by a click, which satisfies the gesture requirement.

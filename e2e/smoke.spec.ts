@@ -27,6 +27,7 @@ test('the deployed wall serves its shell', async ({ page }) => {
 
 test('at least one real camera is actually advancing frames', async ({ page }) => {
   await page.goto('/');
+  await page.getByRole('button', { name: /start monitoring/ }).first().click();
 
   const pills = page.locator('.roster__pick .pill');
   await expect(pills.first()).toBeVisible();
@@ -45,6 +46,7 @@ test('the watchdog worker is running, not merely bundled', async ({ page }) => {
   const failures: string[] = [];
   page.on('pageerror', (e) => failures.push(e.message));
   await page.goto('/');
+  await page.getByRole('button', { name: /start monitoring/ }).first().click();
 
   // A dead worker leaves every feed at 'idle' forever: the wall renders, the
   // canvas composites, and nothing is being measured.

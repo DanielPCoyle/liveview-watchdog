@@ -15,6 +15,9 @@ const MOCK = '/?mock=1';
 async function wallReady(page: Page) {
   await page.goto(MOCK);
   await expect(page.locator('.roster__item')).toHaveCount(3);
+  // Feeds attach on an explicit go-ahead; a test should take the same path a
+  // user does rather than reaching past the control.
+  await page.getByRole('button', { name: /start monitoring/ }).first().click();
   // Wait for the watchdog to have said something about the first feed.
   await expect(page.locator('.roster__item').first().locator('.pill')).toHaveText('live', { timeout: 15000 });
 }

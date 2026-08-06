@@ -35,6 +35,8 @@ Most dashboards answer *"is it connected?"* That's a proxy. This answers *"are f
 
 - **Frame-aware liveness** per feed. The pill reports whether frames are advancing, not whether the element claims to be connected.
 - **Auto-promote on failure.** Any feed that goes stale moves into the main area automatically; several can share it, because an incident can involve more than one camera. Recovery shows a **Signal restored** toast, holds four seconds so it can be read, then shrinks back to the carousel.
+- **Start on a go-ahead.** Four live decoders is a real cost to impose on someone who has just opened a link, so the shell, roster and controls render first and feeds attach when you say so. The choice is remembered, because an operator opening their wall every morning should not have to confirm it every morning.
+- **Number keys select by position** — `1`–`9` and `0` for the tenth, pressing the same key again to put the camera back. Ignored while typing or while a dialog is open, and modifier combinations are left to the browser.
 - **Click to focus**, ✕ or `Esc` to return. Selection drives real policy, not just layout ([below](#focus-view--not-just-layout)).
 - **Feed registry on the grid.** Feeds are registered, not hard-coded — an empty slot sits in the wall where the next feed will go, and each tile carries its own remove control. Groups live behind **manage groups**; only the active group is mounted, because decode is the ceiling. Registering offers a **catalogue of verified feeds** in a searchable dropdown — including one deliberately-broken entry (Apple bipbop, which is VOD) so you can see a rejection — and still accepts any pasted `.m3u8`. Either way the URL is probed (live / VOD / CORS) before it reaches the wall.
 - **Roster panel per group.** The wall answers *"is anything wrong"*; the roster answers *"where is the one I'm thinking of"* — a different question, and the one that gets slow first. Search by name or source URL, filter by liveness, and **hover a row to swell its tile on the wall** so the list and the picture stay tied together without committing to a layout change. Click to promote. Each row carries **report / ignore / edit / mute / remove**, and rows **drag to reorder** — the roster order *is* the wall order, so rearranging the list rearranges the grid (alt + ↑/↓ does the same without a mouse; reordering is disabled while the list is filtered, because arranging rows you can't see has no defined meaning).
@@ -211,6 +213,26 @@ Freezing a mock **does not stop its heartbeat**. Frames stopping is the easy cas
 | `ci.yml` | push / PR / manual | Typecheck (strict, `noUnusedLocals`), tests + per-file coverage floors, production build |
 | `e2e.yml` | push / PR / manual | The hermetic Playwright suite against a real build |
 | `smoke.yml` | every 6h + manual | Frames advancing on the live deployment |
+
+## Measured page quality
+
+Lighthouse, mobile emulation with 4x CPU throttling, against a production build:
+
+| | |
+|---|---:|
+| Performance | 96–99 |
+| Accessibility | 100 |
+| Best Practices | 100 |
+| SEO | 100 |
+
+Getting there was mostly about **not doing work before it is needed**, which turned out to be the same list a reviewer would write anyway:
+
+- three.js (~500kb) and react-select are loaded on demand; the wall's geometry was split out of the module that imports three.js so asking for a rectangle stops pulling in WebGL. hls.js is fetched when a feed attaches rather than at load. The entry bundle went 746kb to 239kb.
+- The compositor, the watchdog worker and every decoder now come up when the wall is started, not when the page loads. An unstarted wall has nothing to composite and nothing to watch.
+- The render loop was unbounded `requestAnimationFrame`; it is capped at 30fps, which is indistinguishable on traffic footage, and skipped entirely while the tab is hidden.
+- Telemetry initialises on idle instead of during load.
+
+**The honest caveat: a running wall does not score 90.** Measured on the same build, with four live cameras playing, performance is 36–41 and Total Blocking Time is ~28s. That is not a defect being hidden — it is the product working, and Lighthouse cannot compute Time to Interactive for a page that never has a quiet main thread. The scores above describe a cold load, which is what the audit actually measures; the deferred start is what makes those two facts consistent rather than contradictory.
 
 ## Deployment
 

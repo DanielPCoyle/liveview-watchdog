@@ -39,6 +39,7 @@ class StubWorker implements Partial<Worker> {
   onmessageerror: (() => void) | null = null;
   static last: StubWorker | null = null;
   constructor() { StubWorker.last = this; }
+  static reset() { StubWorker.last = null; }
   postMessage() {}
   terminate() {}
   addEventListener() {}

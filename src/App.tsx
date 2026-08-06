@@ -73,6 +73,9 @@ const CONFIRM_TICKS = 12;
 
 /** Gap between bringing successive feeds online — see `mountLimit`. */
 const STAGGER_MS = 120;
+
+/** Remembers that this operator has started the wall before. */
+const AUTOSTART_KEY = 'liveview-watchdog:autostart';
 /**
  * `feedId` as well as `cam`: labels are neither unique nor stable — two feeds
  * can carry the same name and editing one renames it — so grouping a feed's own
@@ -656,6 +659,11 @@ function FeedRoster(props: {
                   }}>
                   {props.listMode && <Thumb el={props.elsById[t.id] ?? null} big={isHero} />}
                   <span className="roster__meta">
+                    {props.tiles.indexOf(t) < 10 && (
+                      <kbd className="roster__key" aria-hidden>
+                        {(props.tiles.indexOf(t) + 1) % 10}
+                      </kbd>
+                    )}
                     {!props.listMode && (
                       <span className="roster__grip" aria-hidden
                         title={narrowed ? 'Clear the search to reorder' : 'Drag to reorder — or alt + ↑/↓'}>⠿</span>
@@ -786,6 +794,13 @@ export default function App() {
   /** The watchdog itself died — every pill on screen is now a stale claim. */
   const [workerDown, setWorkerDown] = useState(false);
   /**
+   * Bumped when the worker exists. Registration has to depend on this, not just
+   * on the feed list: the worker is created when the wall starts, which is
+   * later than mount, and a registration effect keyed only on `tiles` would
+   * never re-run — leaving every feed unregistered and permanently idle.
+   */
+  const [workerReady, setWorkerReady] = useState(0);
+  /**
    * Acknowledged feeds. Deliberately NOT persisted: an acknowledgement is about
    * a shift, not about a camera, and one that silently survives a reload is how
    * a feed stays suppressed long after the person who suppressed it went home.
@@ -806,6 +821,27 @@ export default function App() {
    * come up in sequence instead — the first immediately, the rest close behind.
    */
   const [mountLimit, setMountLimit] = useState(1);
+
+  /**
+   * Whether the wall has been started.
+   *
+   * Four live decoders is a real cost to impose on someone who has just opened
+   * a link, so the shell, the roster and the controls all render first and the
+   * feeds attach on an explicit go-ahead. It is also the honest shape for the
+   * browser's own rules: audio needs a gesture regardless, and this makes the
+   * gesture mean something.
+   *
+   * The choice is remembered, because an operator opening their wall every
+   * morning should not have to confirm it every morning.
+   */
+  const [started, setStarted] = useState(() => {
+    try { return localStorage.getItem(AUTOSTART_KEY) === '1'; } catch { return false; }
+  });
+  const startWall = useCallback(() => {
+    setStarted(true);
+    try { localStorage.setItem(AUTOSTART_KEY, '1'); } catch { /* private mode */ }
+    track('wall_started');
+  }, []);
   const workerRef = useRef<Worker | null>(null);
   const elsRef = useRef<Record<string, HTMLVideoElement | null>>({});
   const prevLiveness = useRef<Record<string, Liveness>>({});
@@ -864,6 +900,7 @@ export default function App() {
   }, [registry.groups, activeGroup]);
 
   useEffect(() => {
+    if (!started) return;
     const w = new Worker(new URL('./watchdog.worker.ts', import.meta.url), { type: 'module' });
     workerRef.current = w;
     /**
@@ -877,6 +914,7 @@ export default function App() {
       setWorkerDown(true);
     };
     w.onmessageerror = () => captureError(new Error('watchdog worker sent an undeserializable message'));
+    setWorkerReady((n) => n + 1);
     w.onmessage = (e: MessageEvent<FromWorker>) => {
       if (e.data.type !== 'status') return;
       setStatuses((prev) => {
@@ -886,7 +924,7 @@ export default function App() {
       });
     };
     return () => { w.terminate(); workerRef.current = null; };
-  }, []);
+  }, [started]);
 
   useEffect(() => {
     const w = workerRef.current;
@@ -894,7 +932,7 @@ export default function App() {
     for (const t of tiles) {
       w.postMessage({ type: 'register', id: t.id, staleAfterMs: STALE_AFTER_MS, degradedAfterMs: DEGRADED_AFTER_MS } satisfies ToWorker);
     }
-  }, [tiles]);
+  }, [tiles, workerReady]);
 
   // Debounced view of liveness: what the UI, the incident log and auto-promote
   // all act on. Raw per-tick status still drives the pill so the operator sees
@@ -1006,17 +1044,17 @@ export default function App() {
   }, [manualIds, autoPromote, staleIds, resolving, tiles, ignored]);
 
   useEffect(() => {
-    if (mountLimit >= tiles.length) return;
+    if (!started || mountLimit >= tiles.length) return;
     const t = window.setTimeout(() => setMountLimit((n) => n + 1), STAGGER_MS);
     return () => window.clearTimeout(t);
-  }, [mountLimit, tiles.length]);
+  }, [started, mountLimit, tiles.length]);
 
   // Shrinking the group must not leave the limit stranded above it.
   useEffect(() => {
     if (tiles.length && mountLimit > tiles.length) setMountLimit(tiles.length);
   }, [tiles.length, mountLimit]);
 
-  const mounted = useMemo(() => tiles.slice(0, mountLimit), [tiles, mountLimit]);
+  const mounted = useMemo(() => (started ? tiles.slice(0, mountLimit) : []), [started, tiles, mountLimit]);
 
   const heroKey = heroIds.join(',');
   // The empty "add feed" slot occupies a real grid position, so it is part of
@@ -1044,6 +1082,37 @@ export default function App() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [heroKey, clearFocus]);
+
+  /**
+   * Number keys select a camera by its position in the group, and pressing the
+   * same number again puts it back. `0` is the tenth, following the usual
+   * keypad convention, so a group of ten is reachable without a mouse.
+   *
+   * Deliberately ignored while typing or while a dialog is open — the roster
+   * search box is one keystroke away from the wall, and a number typed into it
+   * should be a search, not a camera. Modifiers pass through untouched so the
+   * browser keeps its own Cmd/Ctrl+number tab switching.
+   */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (!/^[0-9]$/.test(e.key)) return;
+
+      const el = document.activeElement as HTMLElement | null;
+      const typing = el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
+        || el.tagName === 'SELECT' || el.isContentEditable);
+      if (typing) return;
+      if (document.querySelector('.modal')) return;
+
+      const index = e.key === '0' ? 9 : Number(e.key) - 1;
+      const tile = tiles[index];
+      if (!tile) return;
+      e.preventDefault();
+      onToggleFocus(tile.id);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [tiles, onToggleFocus]);
 
   useEffect(() => {
     setManualIds((prev) => prev.filter((id) => tiles.some((t) => t.id === id)));
@@ -1250,6 +1319,11 @@ export default function App() {
             );
           })}
         </div>
+        {!started && (
+          <button className="on start" onClick={startWall}>
+            ▶ start monitoring
+          </button>
+        )}
         <button onClick={() => setGroupsOpen(true)}>manage groups</button>
         <button className={autoPromote ? 'on' : ''} onClick={() => setAutoPromote((v) => !v)}
           title="Promote any feed that loses signal into the main area automatically">
@@ -1277,7 +1351,17 @@ export default function App() {
             stops it decoding — so in list mode the host is collapsed to a
             pixel rather than removed, and only the canvas goes away. */}
         <div className="wall-host">
-          {!listMode && (
+          {!started && (
+            <div className="idlewall">
+              <p><strong>{tiles.length}</strong> feed{tiles.length === 1 ? '' : 's'} registered, none attached.</p>
+              <p>
+                Nothing is being decoded and nothing is being measured yet. Starting the wall
+                opens a decoder per feed and begins watching frame advancement.
+              </p>
+              <button className="on" onClick={startWall}>▶ start monitoring</button>
+            </div>
+          )}
+          {!listMode && started && (
             <Suspense fallback={null}>
               <VideoWall streams={wallStreams} statusById={statusById}
                 heroIds={heroIds} hoverId={hoverId} layout={layout}

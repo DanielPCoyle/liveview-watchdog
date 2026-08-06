@@ -43,6 +43,10 @@ const rows = () => [...document.querySelectorAll('.roster__name')].map((n) => n.
 
 beforeEach(() => {
   localStorage.clear();
+  // Most tests are about a wall that is running, so they stand in for an
+  // operator who has started it before. The first-visit path has its own test.
+  localStorage.setItem('liveview-watchdog:autostart', '1');
+  StubWorker.reset();
   window.history.replaceState({}, '', '/?mock=1');
 });
 afterEach(() => {
@@ -109,6 +113,55 @@ describe('the wall', () => {
     verdict('stale', { staleMs: 3000, reason: 'frames' });   // one tick only
     verdict('live');
     expect(document.querySelector('.roster__inc')!.textContent).toContain('no incidents');
+  });
+});
+
+describe('starting the wall', () => {
+  test('a first visit attaches nothing until the operator says so', async () => {
+    localStorage.removeItem('liveview-watchdog:autostart');
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll('.roster__item').length).toBe(3));
+
+    // The registry is listed, but nothing is decoding and nothing is measured.
+    expect(document.querySelector('.idlewall')).not.toBeNull();
+    expect(document.querySelectorAll('video.decoder').length).toBe(0);
+
+    fireEvent.click(screen.getAllByRole('button', { name: /start monitoring/ })[0]);
+    await waitFor(() => expect(document.querySelectorAll('video.decoder').length).toBeGreaterThan(0));
+    expect(document.querySelector('.idlewall')).toBeNull();
+  });
+
+  /**
+   * Regression: the worker is created when the wall starts, which is later than
+   * mount. A registration effect keyed only on the feed list never re-ran, so
+   * every feed stayed unregistered and permanently idle. Unit tests missed it
+   * because they start pre-authorised; the end-to-end suite caught it.
+   */
+  test('feeds are registered with the watchdog even though it starts later than they do', async () => {
+    localStorage.removeItem('liveview-watchdog:autostart');
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll('.roster__item').length).toBe(3));
+    expect(StubWorker.last).toBeNull();
+
+    fireEvent.click(screen.getAllByRole('button', { name: /start monitoring/ })[0]);
+    await waitFor(() => expect(StubWorker.last).not.toBeNull());
+
+    // The worker exists; the point is that the feeds reached it.
+    verdict('live');
+    await waitFor(() => expect(document.querySelector('.strip')!.textContent).toContain('live3'));
+  });
+
+  test('the choice is remembered, so it is asked once and not every morning', async () => {
+    localStorage.removeItem('liveview-watchdog:autostart');
+    const first = render(<App />);
+    await waitFor(() => expect(document.querySelector('.idlewall')).not.toBeNull());
+    fireEvent.click(screen.getAllByRole('button', { name: /start monitoring/ })[0]);
+    await waitFor(() => expect(document.querySelector('.idlewall')).toBeNull());
+    first.unmount();
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll('.roster__item').length).toBe(3));
+    expect(document.querySelector('.idlewall')).toBeNull();
   });
 });
 
@@ -198,6 +251,45 @@ describe('the roster', () => {
     fireEvent.dragOver(items[2], { dataTransfer: dt });
     fireEvent.drop(items[2], { dataTransfer: dt });
     await waitFor(() => expect(rows()).toEqual(['MOCK-02', 'MOCK-03', 'MOCK-01']));
+  });
+});
+
+describe('number-key selection', () => {
+  test('a number key promotes that camera, and pressing it again returns it', async () => {
+    await mountWall();
+    fireEvent.keyDown(window, { key: '2' });
+    await waitFor(() => expect(document.querySelector('.strip')!.textContent).toContain('promoted1'));
+    expect(document.querySelectorAll('.roster__item')[1].className).toContain('on');
+
+    fireEvent.keyDown(window, { key: '2' });
+    await waitFor(() => expect(document.querySelector('.strip')!.textContent).toContain('promoted0'));
+  });
+
+  test('a number past the end of the group does nothing', async () => {
+    await mountWall();
+    fireEvent.keyDown(window, { key: '9' });
+    await waitFor(() => expect(document.querySelector('.strip')!.textContent).toContain('promoted0'));
+  });
+
+  /** The search box is one keystroke away; a number typed there is a search. */
+  test('numbers typed into a field are left alone', async () => {
+    await mountWall();
+    const search = document.querySelector('.roster__search') as HTMLInputElement;
+    search.focus();
+    fireEvent.keyDown(search, { key: '1' });
+    expect(document.querySelector('.strip')!.textContent).toContain('promoted0');
+  });
+
+  test('modifier combinations are left to the browser', async () => {
+    await mountWall();
+    fireEvent.keyDown(window, { key: '1', metaKey: true });
+    expect(document.querySelector('.strip')!.textContent).toContain('promoted0');
+  });
+
+  test('the shortcut is shown on the row rather than left as folklore', async () => {
+    await mountWall();
+    expect([...document.querySelectorAll('.roster__key')].map((k) => k.textContent))
+      .toEqual(['1', '2', '3']);
   });
 });
 
