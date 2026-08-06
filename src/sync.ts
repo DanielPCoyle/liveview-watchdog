@@ -31,16 +31,21 @@ export interface SyncDriver {
   publish: (r: Registry) => void;
 }
 
-const FB = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY as string | undefined,
-  databaseURL: import.meta.env.VITE_FIREBASE_DATABASE_URL as string | undefined,
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID as string | undefined,
-  appId: import.meta.env.VITE_FIREBASE_APP_ID as string | undefined,
-};
+/** Read at call time rather than module scope, so configuration is a runtime
+ *  fact rather than something frozen at first import. */
+function fbConfig() {
+  return {
+    apiKey: import.meta.env.VITE_FIREBASE_API_KEY as string | undefined,
+    databaseURL: import.meta.env.VITE_FIREBASE_DATABASE_URL as string | undefined,
+    projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID as string | undefined,
+    appId: import.meta.env.VITE_FIREBASE_APP_ID as string | undefined,
+  };
+}
 
 /** A database URL is the only field the RTDB client genuinely cannot infer. */
 export function firebaseConfigured() {
-  return Boolean(FB.databaseURL && FB.apiKey);
+  const fb = fbConfig();
+  return Boolean(fb.databaseURL && fb.apiKey);
 }
 
 function localDriver(): SyncDriver {
@@ -68,12 +73,7 @@ async function firebaseDriver(): Promise<SyncDriver> {
     import('firebase/app'),
     import('firebase/database'),
   ]);
-  const app = initializeApp({
-    apiKey: FB.apiKey,
-    databaseURL: FB.databaseURL,
-    projectId: FB.projectId,
-    appId: FB.appId,
-  });
+  const app = initializeApp(fbConfig());
   const node = ref(getDatabase(app), 'wall/registry');
 
   return {

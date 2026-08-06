@@ -196,7 +196,7 @@ Full reasoning in [ADR-0008](docs/adr/0008-hermetic-e2e-real-smoke.md).
 
 **Production smoke (3 tests, every 6 hours)** — runs against the real deployment and asserts a real camera is advancing frames. Deliberately not a `curl` of index.html. Tolerance is deliberate: a single dead municipal camera is not an alert, *nothing* alive is.
 
-**No coverage threshold, on purpose.** Most of this app is React and WebGL; a percentage gate would push toward testing trivia instead of the parts that can be silently wrong.
+**Floors are enforced at 85%** for lines and functions (`bunfig.toml`), so CI fails on a regression rather than letting coverage erode quietly. `main.tsx` is excluded as bootstrap, along with the test harness itself.
 
 ### The mock seam
 
@@ -208,7 +208,7 @@ Freezing a mock **does not stop its heartbeat**. Frames stopping is the easy cas
 
 | Workflow | Trigger | What it gates |
 |---|---|---|
-| `ci.yml` | push / PR | Typecheck (strict, `noUnusedLocals`), unit tests, production build |
+| `ci.yml` | push / PR | Typecheck (strict, `noUnusedLocals`), tests + 85% coverage floors, production build |
 | `e2e.yml` | push / PR | The hermetic Playwright suite against a real build |
 | `smoke.yml` | every 6h + manual | Frames advancing on the live deployment |
 
@@ -235,7 +235,7 @@ Append `?mock=1` for synthetic canvas-backed feeds that need no network at all.
 
 ```bash
 bun run typecheck        # strict, with noUnusedLocals
-bun test src             # pure logic: layout geometry, probe verdicts, registry fallbacks
+bun test src             # unit + component, with coverage floors enforced
 bunx playwright test     # end-to-end, hermetic (?mock=1) — builds and serves the app
 bun run test:smoke       # the deployed app: are real cameras advancing frames?
 ```

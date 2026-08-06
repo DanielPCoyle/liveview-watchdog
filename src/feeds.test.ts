@@ -8,8 +8,11 @@
  * Hermetic by construction: `fetch` is stubbed, so this suite never touches a
  * network. Run with `bun test`.
  */
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { probeFeed, loadRegistry, DEFAULT_REGISTRY } from './feeds';
+
+// mockMode() reads the URL, and another suite may have left ?mock=1 on it.
+beforeEach(() => window.history.replaceState({}, '', '/'));
 
 const realFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = realFetch; });
@@ -95,21 +98,6 @@ describe('probeFeed', () => {
     expect(r.detail).toContain('SEGMENTS');
   });
 });
-
-/**
- * A Map-backed localStorage. Cheaper and more predictable than pulling in a DOM
- * emulator for five key/value calls, and it keeps the suite runnable under a
- * plain node-ish environment.
- */
-const store = new Map<string, string>();
-globalThis.localStorage = {
-  getItem: (k: string) => store.get(k) ?? null,
-  setItem: (k: string, v: string) => void store.set(k, v),
-  removeItem: (k: string) => void store.delete(k),
-  clear: () => store.clear(),
-  key: (i: number) => [...store.keys()][i] ?? null,
-  get length() { return store.size; },
-} as Storage;
 
 describe('loadRegistry', () => {
   const KEY = 'liveview-watchdog:registry:v3';

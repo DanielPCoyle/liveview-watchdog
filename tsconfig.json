@@ -15,5 +15,5 @@
   // Tests run under `bun test`, which supplies its own types and its own
   // transpile. They are not part of the app build.
   "include": ["src"],
-  "exclude": ["src/**/*.test.ts"]
+  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx", "src/test-setup.ts", "src/three-stub.ts"]
 }

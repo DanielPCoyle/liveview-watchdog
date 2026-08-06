@@ -1,0 +1,16 @@
+[test]
+preload = ["./src/test-setup.ts"]
+coverage = true
+coverageReporter = ["text"]
+coverageSkipTestFiles = true
+
+# Excluded, with reasons:
+#   main.tsx      bootstrap only — wires telemetry, error traps and the root
+#                 render, with no logic to assert on.
+#   test-setup    the harness itself.
+#   three-stub    a test double for three.js, not shipped code.
+coveragePathIgnorePatterns = ["src/main.tsx", "src/test-setup.ts", "src/three-stub.ts"]
+
+# The floor the suite must hold. Set from what the tests actually reach today,
+# so a regression fails CI rather than quietly eroding.
+coverageThreshold = { lines = 0.85, functions = 0.85 }

@@ -31,11 +31,9 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
-      # Pure logic only: layout geometry, the feed probe's verdicts, and the
-      # registry's fallbacks. No coverage threshold is enforced, deliberately —
-      # most of this app is React and WebGL, and a percentage gate would push
-      # toward testing trivia instead of the parts that can be silently wrong.
-      - name: Unit tests
+      # Coverage floors are enforced in bunfig.toml (85% lines and functions);
+      # this step fails if the suite drops below them.
+      - name: Tests + coverage
         run: bun test src
 
       - name: Build
