@@ -9,7 +9,7 @@ coverageSkipTestFiles = true
 #                 render, with no logic to assert on.
 #   test-setup    the harness itself.
 #   three-stub    a test double for three.js, not shipped code.
-coveragePathIgnorePatterns = ["src/main.tsx", "src/test-setup.ts", "src/three-stub.ts", "src/types.ts"]
+coveragePathIgnorePatterns = ["src/main.tsx", "src/test-setup.ts", "src/three-stub.ts", "src/hls-stub.ts", "src/types.ts"]
 
 # The floor the suite must hold, enforced PER FILE by bun rather than on the
 # total, so no single module can rot behind a healthy average.

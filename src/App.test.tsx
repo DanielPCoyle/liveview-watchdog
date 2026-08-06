@@ -11,15 +11,12 @@
  * about how the verdict is reached. That question has its own suite in
  * watchdog.worker.test.ts, where the real logic runs.
  */
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import * as threeStub from './three-stub';
 import { StubWorker } from './test-setup';
 import type { Liveness, StaleReason } from './types';
 
-mock.module('three', () => threeStub);
-
-const App = (await import('./App')).default;
+import App from './App';
 
 /** Push a watchdog verdict for every mounted feed, as the real worker would. */
 function verdict(liveness: Liveness, opts: { staleMs?: number; drift?: number | null; reason?: StaleReason | null } = {}) {

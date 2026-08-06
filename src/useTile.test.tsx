@@ -7,40 +7,11 @@
  * silently revived. Each of those is a decision that would be invisible if it
  * regressed.
  */
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { cleanup, render, waitFor } from '@testing-library/react';
+import { FakeHls } from './hls-stub';
 
-/** A stand-in for hls.js that records what the code under test asked of it. */
-class FakeHls {
-  static instances: FakeHls[] = [];
-  static isSupported = () => true;
-  static Events = {
-    MANIFEST_PARSED: 'manifestParsed', LEVEL_LOADED: 'levelLoaded', ERROR: 'error',
-  };
-  static ErrorTypes = { NETWORK_ERROR: 'networkError', MEDIA_ERROR: 'mediaError', OTHER_ERROR: 'otherError' };
 
-  config: Record<string, unknown>;
-  handlers: Record<string, (e: string, d: unknown) => void> = {};
-  currentLevel = -1;
-  calls: string[] = [];
-  destroyed = false;
-
-  constructor(cfg: Record<string, unknown>) {
-    this.config = { ...cfg };
-    FakeHls.instances.push(this);
-  }
-  on(evt: string, fn: (e: string, d: unknown) => void) { this.handlers[evt] = fn; }
-  loadSource(src: string) { this.calls.push(`loadSource:${src}`); }
-  attachMedia() { this.calls.push('attachMedia'); }
-  startLoad() { this.calls.push('startLoad'); }
-  stopLoad() { this.calls.push('stopLoad'); }
-  recoverMediaError() { this.calls.push('recoverMediaError'); }
-  destroy() { this.destroyed = true; this.calls.push('destroy'); }
-  /** Test helper: raise an event as hls.js would. */
-  fire(evt: string, data: unknown) { this.handlers[evt]?.(evt, data); }
-}
-
-mock.module('hls.js', () => ({ default: FakeHls }));
 
 /** Drive `getVideoPlaybackQuality` so the decode-poll path has something to see. */
 function decodeFrames(perTick: number, dropped = 0) {
@@ -56,7 +27,7 @@ function stopDecoding() {
     .getVideoPlaybackQuality = () => ({ totalVideoFrames: 0, droppedVideoFrames: 0 });
 }
 
-const { useTile } = await import('./useTile');
+import { useTile } from './useTile';
 
 /** Mounts a tile and returns its hls instance plus the element. */
 function mountTile(props: Partial<Parameters<typeof useTile>[0]> = {}) {

@@ -8,7 +8,21 @@
  * code run — the point is to exercise this project's logic, not to reimplement
  * the browser.
  */
+import { mock } from 'bun:test';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
+import * as threeStub from './three-stub';
+import { FakeHls } from './hls-stub';
+
+/**
+ * Library mocks belong here, not in individual test files.
+ *
+ * `mock.module` only rebinds imports that happen AFTER it runs. A suite that
+ * imports VideoWall or useTile without first installing the mock binds the real
+ * library, and then whichever file bun evaluates first decides what every other
+ * file gets. That passed locally and failed in CI on nothing but file order.
+ */
+mock.module('three', () => threeStub);
+mock.module('hls.js', () => ({ default: FakeHls }));
 
 GlobalRegistrator.register({
   url: 'http://localhost/',

@@ -6,13 +6,10 @@
  * the upload budget, and what a click resolves to. Mocking the component
  * instead would have tested nothing.
  */
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { cleanup, render } from '@testing-library/react';
 import * as threeStub from './three-stub';
-
-mock.module('three', () => threeStub);
-
-const { VideoWall, computeLayout } = await import('./VideoWall');
+import { VideoWall, computeLayout } from './VideoWall';
 
 function makeVideo(): HTMLVideoElement {
   const v = document.createElement('video');
