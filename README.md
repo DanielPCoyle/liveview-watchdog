@@ -1,8 +1,20 @@
 # Liveview Watchdog
 
+[![CI](https://github.com/DanielPCoyle/liveview-watchdog/actions/workflows/ci.yml/badge.svg)](https://github.com/DanielPCoyle/liveview-watchdog/actions/workflows/ci.yml)
+[![E2E](https://github.com/DanielPCoyle/liveview-watchdog/actions/workflows/e2e.yml/badge.svg)](https://github.com/DanielPCoyle/liveview-watchdog/actions/workflows/e2e.yml)
+[![Production smoke test](https://github.com/DanielPCoyle/liveview-watchdog/actions/workflows/smoke.yml/badge.svg)](https://github.com/DanielPCoyle/liveview-watchdog/actions/workflows/smoke.yml)
+
 **A tile is only *live* if frames are advancing. Connection state is not liveness.**
 
 A live-video wall that can tell a working feed from a dead one and prove it, built on real public HLS streams, composited on the GPU, with the watchdog running off the main thread.
+
+> **Live demo:** <https://liveview-watchdog-production.up.railway.app> · **Hermetic mode:** append `?mock=1` for synthetic feeds that need no network · **Decisions:** [`docs/adr/`](docs/adr/README.md)
+
+That third badge is the one worth explaining. It does not check that the site
+returns 200 — a 200 for the shell is precisely the naive check this project
+exists to distrust, and it stays green while every camera on the wall is dead.
+It loads the deployed app every six hours and asserts that a real camera is
+**advancing frames**. The project's own thesis, pointed at its own deployment.
 
 ---
 
@@ -119,7 +131,28 @@ bun install     # or npm install
 bun run dev     # http://localhost:5183
 ```
 
-No other setup — the feeds are public. Start with 1–2 feeds; each additional 720p stream is a full decoder, and that is the real ceiling (see below).
+No other setup — the feeds are public, and nothing needs configuring. Start with 1–2 feeds; each additional stream is a full decoder, and that is the real ceiling (see below).
+
+Append `?mock=1` for synthetic canvas-backed feeds that need no network at all — the transport is replaced, everything downstream is real.
+
+### Tests
+
+```bash
+bun run typecheck        # strict, with noUnusedLocals
+bun test src             # pure logic: layout geometry, probe verdicts, registry fallbacks
+bunx playwright test     # end-to-end, hermetic (?mock=1) — builds and serves the app
+bun run test:smoke       # the deployed app: are real cameras advancing frames?
+```
+
+### Optional integrations
+
+Everything below is off unless configured, and each is code-split so an unconfigured build never downloads the vendor SDK. See [`.env.example`](.env.example).
+
+| Set | Turns on |
+|---|---|
+| `VITE_FIREBASE_*` | **Shared wall** — the feed registry is live across every operator on the same database instead of one browser. The header says `shared` rather than `local`. |
+| `VITE_SENTRY_DSN` | Error reporting. Unset, errors go to the console and the UI still tells the operator when the watchdog worker has died. |
+| `VITE_GA_ID` | Analytics, as a closed set of domain events (signal lost/restored, escalations, registrations) rather than a click tally. |
 
 ## Two bugs worth recording
 

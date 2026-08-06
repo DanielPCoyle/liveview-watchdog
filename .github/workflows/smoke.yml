@@ -1,0 +1,46 @@
+name: Production smoke test
+
+# Every six hours. The thing being watched for is not a deploy regression — it
+# is decay: these are third-party municipal cameras, and when one is
+# decommissioned or its origin changes, the deployed demo silently becomes a
+# wall of dead tiles. Nothing about the app changes when that happens, which is
+# exactly why a schedule rather than a push trigger.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 */6 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Frames advancing in production
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
+
+      - name: Install browser
+        run: bunx playwright install --with-deps chromium
+
+      # Deliberately NOT a curl of index.html. A 200 for the shell is the naive
+      # check this project exists to distrust: the page can serve perfectly
+      # while every camera on it is dead. This asserts frames are advancing.
+      - name: Assert the deployed wall is actually live
+        env:
+          SMOKE_BASE_URL: https://liveview-watchdog-production.up.railway.app
+        run: bunx playwright test --config playwright.smoke.config.ts
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: smoke-report
+          path: playwright-report/
+          retention-days: 14

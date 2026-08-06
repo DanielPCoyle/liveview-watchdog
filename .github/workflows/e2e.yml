@@ -1,0 +1,43 @@
+name: E2E
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: e2e-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: End-to-end (hermetic)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
+
+      - name: Install browser
+        run: bunx playwright install --with-deps chromium
+
+      # Runs against ?mock=1 synthetic feeds, never against public CCTV: those
+      # origins rot, and a suite that goes red when a highway camera reboots is
+      # a suite people learn to ignore. Real feeds are the smoke test's job.
+      - name: Run e2e
+        run: bunx playwright test
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7

@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Typecheck, test & build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
+
+      # Strict mode with noUnusedLocals — this is the gate that catches state
+      # left dangling when a feature is removed.
+      - name: Typecheck
+        run: bun run typecheck
+
+      # Pure logic only: layout geometry, the feed probe's verdicts, and the
+      # registry's fallbacks. No coverage threshold is enforced, deliberately —
+      # most of this app is React and WebGL, and a percentage gate would push
+      # toward testing trivia instead of the parts that can be silently wrong.
+      - name: Unit tests
+        run: bun test src
+
+      - name: Build
+        run: bun run build
