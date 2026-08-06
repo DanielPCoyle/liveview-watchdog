@@ -353,6 +353,22 @@ function GroupPanel(props: {
   );
 }
 
+/**
+ * The clock owns its own state.
+ *
+ * It used to live in App, where a tick every second re-rendered the header, the
+ * strip, the controls, the roster and every tile overlay — the whole tree, once
+ * a second, for a digit. Isolating it means the second-hand costs one node.
+ */
+function Clock() {
+  const [now, setNow] = useState(() => new Date().toLocaleTimeString());
+  useEffect(() => {
+    const t = window.setInterval(() => setNow(new Date().toLocaleTimeString()), 1000);
+    return () => window.clearInterval(t);
+  }, []);
+  return <div className="bar__clock">{now}</div>;
+}
+
 interface Tile { id: string; label: string; src: string; faultable: boolean }
 
 /**
@@ -778,7 +794,6 @@ export default function App() {
   const [statuses, setStatuses] = useState<Record<string, WorkerStatus>>({});
   const [wallFps, setWallFps] = useState(0);
   const [incidents, setIncidents] = useState<Incident[]>([]);
-  const [clock, setClock] = useState(() => new Date().toLocaleTimeString());
   const [elVersion, setElVersion] = useState(0);
 
   const [escalations, setEscalations] = useState<Escalation[]>([]);
@@ -846,11 +861,6 @@ export default function App() {
   const elsRef = useRef<Record<string, HTMLVideoElement | null>>({});
   const prevLiveness = useRef<Record<string, Liveness>>({});
   const perf = useLongTasks();
-
-  useEffect(() => {
-    const t = window.setInterval(() => setClock(new Date().toLocaleTimeString()), 1000);
-    return () => window.clearInterval(t);
-  }, []);
 
   // Only the ACTIVE group is mounted. Decode is the ceiling — one decoder per
   // feed — so tabs are what make a large registry affordable rather than a way
@@ -1276,7 +1286,7 @@ export default function App() {
               : 'Private wall — the feed list is stored in this browser only'}>
             {syncMode === 'firebase' ? 'shared' : 'local'}
           </span>
-          <div className="bar__clock">{clock}</div>
+          <Clock />
         </div>
       </header>
 
