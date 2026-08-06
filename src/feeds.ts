@@ -77,7 +77,31 @@ export const DEFAULT_REGISTRY: Registry = {
   ],
 };
 
+/**
+ * `?mock=1` — the hermetic seam, in the spirit of an `OWM_MOCK` env flag.
+ *
+ * The end-to-end suite must not depend on a third-party CCTV origin being up:
+ * this README documents those feeds rotting as a known hazard, and a test suite
+ * that goes red when a highway camera reboots teaches people to ignore it.
+ *
+ * A `mock:` source is served by a canvas in the browser (see `useTile`), so the
+ * full path — decode heartbeat, worker clock, hysteresis, auto-promote,
+ * incident log — runs offline and deterministically. What it does NOT cover is
+ * real HLS behaviour; that is the production smoke test's job.
+ */
+export function mockMode(): boolean {
+  return typeof location !== 'undefined' && new URLSearchParams(location.search).has('mock');
+}
+
+export const MOCK_REGISTRY: Registry = {
+  groups: [{ id: 'g-mock', name: 'Mock' }],
+  feeds: [1, 2, 3].map((n) => ({
+    id: `f-mock${n}`, label: `MOCK-0${n}`, src: `mock:cam${n}`, groupId: 'g-mock',
+  })),
+};
+
 export function loadRegistry(): Registry {
+  if (mockMode()) return MOCK_REGISTRY;
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return DEFAULT_REGISTRY;
@@ -91,6 +115,8 @@ export function loadRegistry(): Registry {
 }
 
 export function saveRegistry(r: Registry) {
+  // A mock run must not leave its fake cameras in the operator's real wall.
+  if (mockMode()) return;
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(r)); } catch { /* quota / private mode */ }
 }
 

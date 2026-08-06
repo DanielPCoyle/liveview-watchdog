@@ -9,7 +9,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@sentry/react": "^10.69.0",
     "@types/three": "^0.185.4",
+    "firebase": "^12.17.1",
     "hls.js": "^1.5.17",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

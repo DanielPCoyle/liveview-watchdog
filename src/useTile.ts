@@ -1,11 +1,15 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import Hls from 'hls.js';
+import { captureError } from './telemetry';
 import type { Fault, NaiveState, TileStats } from './types';
 
 const MAX_INTERVALS = 300;
 
 /** Floor for forward buffer, in seconds — see the LEVEL_LOADED handler. */
 const MIN_BUFFER_S = 3;
+
+/** Recovery attempts per error class before a feed is left dead and reported. */
+const MAX_RECOVERIES = 3;
 
 function percentile(sorted: number[], q: number): number | null {
   if (!sorted.length) return null;
@@ -33,6 +37,8 @@ export interface UseTileArgs {
 export function useTile({ id, src, fault, focused = false, audible = false, onFrame, onIdle }: UseTileArgs) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const hlsRef = useRef<Hls | null>(null);
+  /** The ERROR handler is bound once at attach; the fault changes under it. */
+  const faultRef = useRef<Fault>(fault);
   const intervalsRef = useRef<number[]>([]);
   const lastNowRef = useRef<number | null>(null);
   const observedRef = useRef(0);
@@ -54,6 +60,87 @@ export function useTile({ id, src, fault, focused = false, audible = false, onFr
       if (disposed) return;
       setNaive(v.error ? 'error' : v.readyState >= 2 && !v.paused ? 'connected' : 'idle');
     };
+
+    /**
+     * Synthetic feed for `mock:` sources — see `mockMode()` in feeds.ts.
+     *
+     * A canvas `captureStream` gives the element a real MediaStream, so the
+     * wall and the row thumbnails draw an actual moving picture, and the frame
+     * heartbeat is emitted on the same channel a real decoder uses. Everything
+     * downstream — worker clock, hysteresis, auto-promote, incidents — is
+     * therefore exercised for real; only the HLS transport is replaced.
+     *
+     * `freeze` stops emitting frames, which is exactly what a starved buffer
+     * does, so the fault behaves the same way it does against a live feed.
+     */
+    if (src.startsWith('mock:')) {
+      const canvas = document.createElement('canvas');
+      canvas.width = 320; canvas.height = 180;
+      const ctx = canvas.getContext('2d');
+      v.srcObject = canvas.captureStream(15);
+      void v.play().catch(() => {});
+      let media = 0;
+      let last = Date.now();
+      let delivered = 0;
+      const tick = window.setInterval(() => {
+        if (disposed) return;
+        const now = Date.now();
+        const dt = now - last;
+        last = now;
+
+        /**
+         * Freezing does NOT stop the heartbeat, and that is the whole point.
+         *
+         * A feed whose frames stop arriving is the easy case — any arrival-based
+         * check catches it, and it is barely distinguishable from signal loss.
+         * The failure this project exists for is the other one: frames keep
+         * arriving, the element stays `readyState 4` and unpaused, the naive
+         * check keeps reporting "connected" — and the media clock has stopped,
+         * so what is on screen is not now.
+         *
+         * So a frozen mock keeps delivering frames at full rate and keeps
+         * reporting the SAME media time. Windowed drift collapses to 0 and the
+         * watchdog calls it stale on the evidence that actually matters, while
+         * every other indicator still looks healthy.
+         */
+        const frozen = faultRef.current === 'freeze';
+        // The media clock is derived from ELAPSED TIME, not from a tick count.
+        // Counting ticks assumes the timer actually fires at its nominal rate;
+        // when it doesn't, media falls behind wall clock and every feed looks
+        // stale for a reason that is purely an artefact of the mock.
+        if (!frozen) media += dt / 1000;
+        delivered += 1;
+
+        if (ctx) {
+          ctx.fillStyle = '#0d1520'; ctx.fillRect(0, 0, 320, 180);
+          ctx.fillStyle = '#4fa37c'; ctx.font = '16px monospace';
+          ctx.fillText(`${src} ${media.toFixed(1)}s`, 16, 96);
+        }
+
+        observedRef.current += 1;
+        onFrame(id, now, media);
+      }, 66);
+
+      // Stats on the same 400ms cadence the real path uses. Pushing them from
+      // the frame loop meant a React render per tile per frame — 45 a second on
+      // three feeds, which starved the very interval being measured.
+      const mockStats = window.setInterval(() => {
+        if (disposed) return;
+        setNaive('connected');
+        setStats((s) => ({
+          ...s, observedFrames: delivered, totalFrames: delivered,
+          droppedFrames: 0, droppedPct: 0, p50IntervalMs: 66,
+        }));
+      }, 400);
+
+      return () => {
+        disposed = true;
+        window.clearInterval(tick);
+        window.clearInterval(mockStats);
+        v.srcObject = null;
+        onIdle(id);
+      };
+    }
 
     if (Hls.isSupported()) {
       // Small forward buffer: what a genuinely live view runs for latency, and
@@ -86,7 +173,42 @@ export function useTile({ id, src, fault, focused = false, audible = false, onFr
         const want = Math.max(MIN_BUFFER_S, (d.details.targetduration || 0) * 2);
         if (hls.config.maxBufferLength !== want) hls.config.maxBufferLength = want;
       });
-      hls.on(Hls.Events.ERROR, (_e, d) => { if (d.fatal) refreshNaive(); });
+      /**
+       * Fatal errors follow hls.js's own recovery ladder — reload on a network
+       * error, flush and recover on a media error — but bounded, so a genuinely
+       * dead origin does not become an infinite retry loop chewing the main
+       * thread it is supposed to be measuring.
+       *
+       * Two things this deliberately does NOT do.
+       *
+       * It does not recover a feed the operator froze. `freeze` IS a
+       * `stopLoad()`, and that surfaces as a fatal network error seconds later;
+       * calling `startLoad()` on it would silently undo the injected fault and
+       * make the demo lie about what it just did.
+       *
+       * It does not touch the watchdog. Recovery is an attempt, not an outcome —
+       * the tile stays stale until frames actually advance again, because that
+       * is the only evidence worth anything here. A feed that reconnects and
+       * then delivers nothing is precisely the failure this project exists for.
+       */
+      let netRetries = 0;
+      let mediaRetries = 0;
+      hls.on(Hls.Events.ERROR, (_e, d) => {
+        if (!d.fatal) return;
+        refreshNaive();
+        if (faultRef.current === 'freeze') return;
+        if (d.type === Hls.ErrorTypes.NETWORK_ERROR && netRetries < MAX_RECOVERIES) {
+          netRetries += 1;
+          hls.startLoad();
+        } else if (d.type === Hls.ErrorTypes.MEDIA_ERROR && mediaRetries < MAX_RECOVERIES) {
+          mediaRetries += 1;
+          hls.recoverMediaError();
+        } else {
+          captureError(new Error(`hls fatal: ${d.type} / ${d.details}`), {
+            feed: id, src, netRetries, mediaRetries,
+          });
+        }
+      });
       hls.loadSource(src);
       hls.attachMedia(v);
     } else if (v.canPlayType('application/vnd.apple.mpegurl')) {
@@ -167,6 +289,7 @@ export function useTile({ id, src, fault, focused = false, audible = false, onFr
 
   // ── fault injection — all three are REAL, none cosmetic ──────────────────
   useEffect(() => {
+    faultRef.current = fault;
     const hls = hlsRef.current;
     const v = videoRef.current;
     if (!v) return;

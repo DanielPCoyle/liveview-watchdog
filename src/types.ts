@@ -52,8 +52,19 @@ export type ToWorker =
   | { type: 'frame'; id: string; at: number; mediaTime: number }
   | { type: 'idle'; id: string };
 
+/**
+ * Why a feed was called stale. The two are different failures and an operator
+ * reading a log needs to know which one they are looking at:
+ *
+ *   frames  nothing is arriving at all — the easy case, close to signal loss.
+ *   drift   frames ARE arriving at full rate and the media clock has stopped.
+ *           Every arrival-based indicator still reads healthy. This is the
+ *           failure the project exists to catch.
+ */
+export type StaleReason = 'frames' | 'drift';
+
 export type FromWorker = {
   type: 'status';
-  /** id → [liveness, staleMs, mediaDriftRatio|null] */
-  entries: Array<[string, Liveness, number, number | null]>;
+  /** id → [liveness, staleMs, mediaDriftRatio|null, staleReason|null] */
+  entries: Array<[string, Liveness, number, number | null, StaleReason | null]>;
 };

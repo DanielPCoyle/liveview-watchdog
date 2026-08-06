@@ -2,10 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import CreatableSelect from 'react-select/creatable';
 import { useTile } from './useTile';
 import { useLongTasks } from './perf';
+import { captureError, track } from './telemetry';
 import { VideoWall, computeLayout, emphasize, VW, VH, type Box, type WallStreamRef } from './VideoWall';
-import type { Fault, FromWorker, Liveness, ToWorker } from './types';
+import type { Fault, FromWorker, Liveness, StaleReason, ToWorker } from './types';
+import { createSync, type SyncDriver, type SyncMode } from './sync';
 import {
-  loadRegistry, saveRegistry, probeFeed,
+  loadRegistry, probeFeed,
   DEFAULT_REGISTRY, FEED_CATALOG, type Registry, type ProbeResult,
 } from './feeds';
 
@@ -47,7 +49,7 @@ const STALE_AFTER_MS = 1200;
  */
 const RESOLVE_HOLD_MS = 4000;
 
-interface WorkerStatus { liveness: Liveness; staleMs: number; drift: number | null }
+interface WorkerStatus { liveness: Liveness; staleMs: number; drift: number | null; reason: StaleReason | null }
 
 /**
  * Consecutive worker ticks a state must hold before it counts.
@@ -67,7 +69,7 @@ const CONFIRM_TICKS = 12;
  * can carry the same name and editing one renames it — so grouping a feed's own
  * history by its display name would attach incidents to the wrong camera.
  */
-interface Incident { at: string; feedId: string; cam: string; text: string; kind: 'lost' | 'restored' }
+interface Incident { at: string; feedId: string; cam: string; text: string; kind: 'lost' | 'restored'; reason: StaleReason | null }
 
 /**
  * An escalation is a snapshot, not a message. The evidence is captured at the
@@ -799,7 +801,8 @@ function FeedRoster(props: {
                             <span className={`roster__inc-icon ${latest.kind}`}><Icon name="warning" /></span>
                             <time>{latest.at}</time>
                             <span className="roster__inc-text">
-                              {latest.kind === 'lost' ? 'signal lost' : 'restored'}
+                              {latest.kind === 'restored' ? 'restored'
+                                : latest.reason === 'drift' ? 'frames stale' : 'signal lost'}
                             </span>
                             {inc.length > 1 && <span className="roster__inc-n">{inc.length}</span>}
                           </>
@@ -900,6 +903,8 @@ export default function App() {
   const [editing, setEditing] = useState<string | null>(null);
   /** Feed whose full report is open. */
   const [inspecting, setInspecting] = useState<string | null>(null);
+  /** The watchdog itself died — every pill on screen is now a stale claim. */
+  const [workerDown, setWorkerDown] = useState(false);
   /**
    * Acknowledged feeds. Deliberately NOT persisted: an acknowledgement is about
    * a shift, not about a camera, and one that silently survives a reload is how
@@ -929,7 +934,37 @@ export default function App() {
     [registry.feeds, activeGroup],
   );
 
-  useEffect(() => { saveRegistry(registry); }, [registry]);
+  /**
+   * Registry persistence goes through the sync driver: localStorage by default,
+   * Realtime Database when configured. Compare against the last value we either
+   * published or received, so a remote update does not immediately echo back as
+   * a local write and ping-pong between operators.
+   */
+  const syncRef = useRef<SyncDriver | null>(null);
+  const lastSynced = useRef<string>('');
+  const [syncMode, setSyncMode] = useState<SyncMode>('local');
+
+  useEffect(() => {
+    let unsub = () => {};
+    let cancelled = false;
+    void createSync().then((driver) => {
+      if (cancelled) return;
+      syncRef.current = driver;
+      setSyncMode(driver.mode);
+      unsub = driver.subscribe((r) => {
+        lastSynced.current = JSON.stringify(r);
+        setRegistry(r);
+      });
+    });
+    return () => { cancelled = true; unsub(); };
+  }, []);
+
+  useEffect(() => {
+    const json = JSON.stringify(registry);
+    if (json === lastSynced.current) return;
+    lastSynced.current = json;
+    syncRef.current?.publish(registry);
+  }, [registry]);
 
   useEffect(() => {
     if (!registry.groups.some((g) => g.id === activeGroup)) {
@@ -940,11 +975,22 @@ export default function App() {
   useEffect(() => {
     const w = new Worker(new URL('./watchdog.worker.ts', import.meta.url), { type: 'module' });
     workerRef.current = w;
+    /**
+     * If the worker dies, every tile silently freezes on its last reported
+     * liveness — the wall keeps showing "live" for feeds nobody is watching any
+     * more. That is the failure mode this project is named after, so it gets
+     * reported rather than swallowed.
+     */
+    w.onerror = (e) => {
+      captureError(new Error(`watchdog worker error: ${e.message}`), { filename: e.filename, line: e.lineno });
+      setWorkerDown(true);
+    };
+    w.onmessageerror = () => captureError(new Error('watchdog worker sent an undeserializable message'));
     w.onmessage = (e: MessageEvent<FromWorker>) => {
       if (e.data.type !== 'status') return;
       setStatuses((prev) => {
         const next = { ...prev };
-        for (const [id, liveness, staleMs, drift] of e.data.entries) next[id] = { liveness, staleMs, drift };
+        for (const [id, liveness, staleMs, drift, reason] of e.data.entries) next[id] = { liveness, staleMs, drift, reason };
         return next;
       });
     };
@@ -995,12 +1041,30 @@ export default function App() {
       if (!now) continue;
       const was = prevLiveness.current[t.id];
       if (was && was !== now) {
-        if (now === 'stale') add.push({ at: new Date().toLocaleTimeString(), feedId: t.id, cam: t.label, text: 'signal lost — frames stopped arriving', kind: 'lost' });
-        else if (was === 'stale') { add.push({ at: new Date().toLocaleTimeString(), feedId: t.id, cam: t.label, text: 'signal restored', kind: 'restored' }); recovered.push(t.id); }
+        if (now === 'stale') {
+          // Say which failure it was. "Frames stopped" and "frames arriving,
+          // picture frozen" need different responses, and collapsing them into
+          // one message throws away the only interesting part.
+          const drifted = statuses[t.id]?.reason === 'drift';
+          add.push({
+            at: new Date().toLocaleTimeString(), feedId: t.id, cam: t.label,
+            text: drifted
+              ? 'frames stale — arriving at full rate, picture not advancing'
+              : 'signal lost — frames stopped arriving',
+            kind: 'lost', reason: drifted ? 'drift' : 'frames',
+          });
+        }
+        else if (was === 'stale') { add.push({ at: new Date().toLocaleTimeString(), feedId: t.id, cam: t.label, text: 'signal restored', kind: 'restored', reason: null }); recovered.push(t.id); }
       }
       prevLiveness.current[t.id] = now;
     }
-    if (add.length) setIncidents((prev) => [...add, ...prev].slice(0, 40));
+    if (add.length) {
+      setIncidents((prev) => [...add, ...prev].slice(0, 40));
+      // The events worth counting: how often feeds actually drop, and how long
+      // they stay down. Anything derived from that is a real question about the
+      // wall rather than a click tally.
+      for (const i of add) track(i.kind === 'lost' ? 'signal_lost' : 'signal_restored', { cam: i.cam });
+    }
     if (recovered.length) {
       setResolving((prev) => {
         const next = { ...prev };
@@ -1063,7 +1127,10 @@ export default function App() {
   );
 
   const onToggleFocus = useCallback((id: string) => {
-    setManualIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+    setManualIds((prev) => {
+      track('feed_focused', { on: !prev.includes(id) });
+      return prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id];
+    });
   }, []);
   const clearFocus = useCallback(() => { setManualIds([]); setResolving({}); }, []);
 
@@ -1086,6 +1153,7 @@ export default function App() {
   }, []);
   const onFaultChange = useCallback((id: string, f: Fault) => {
     setFaults((prev) => ({ ...prev, [id]: f }));
+    track('fault_injected', { fault: f });
   }, []);
   const onEl = useCallback((id: string, el: HTMLVideoElement | null) => {
     if (elsRef.current[id] === el) return;
@@ -1095,6 +1163,7 @@ export default function App() {
   const onFps = useCallback((f: number) => setWallFps(f), []);
   const removeFeed = useCallback((id: string) => {
     setRegistry((r) => ({ ...r, feeds: r.feeds.filter((f) => f.id !== id) }));
+    track('feed_removed');
   }, []);
   const addFeed = useCallback((label: string, src: string) => {
     setRegistry((r) => ({
@@ -1106,6 +1175,7 @@ export default function App() {
       }],
     }));
     setAdding(false);
+    track('feed_registered', { fromCatalog: FEED_CATALOG.some((c) => c.url === src.trim()) });
   }, [activeGroup]);
   const editFeed = useCallback((label: string, src: string) => {
     if (!editing) return;
@@ -1116,6 +1186,7 @@ export default function App() {
         : f)),
     }));
     setEditing(null);
+    track('feed_edited');
   }, [editing]);
   /**
    * Move one feed to another's position within the active group.
@@ -1135,18 +1206,30 @@ export default function App() {
       if (from < 0 || to < 0 || from === to) return r;
       const next = [...inGroup];
       next.splice(to, 0, next.splice(from, 1)[0]);
+      track('feed_reordered');
       let i = 0;
       return { ...r, feeds: r.feeds.map((f) => (f.groupId === activeGroup ? next[i++] : f)) };
     });
   }, [activeGroup]);
   const toggleIgnore = useCallback((id: string) => {
-    setIgnored((prev) => ({ ...prev, [id]: !prev[id] }));
+    setIgnored((prev) => {
+      track('feed_ignored', { on: !prev[id] });
+      return { ...prev, [id]: !prev[id] };
+    });
   }, []);
   const toggleFreeze = useCallback((id: string) => {
-    setFaults((prev) => ({ ...prev, [id]: prev[id] === 'freeze' ? 'none' : 'freeze' }));
+    setFaults((prev) => {
+      const next: Fault = prev[id] === 'freeze' ? 'none' : 'freeze';
+      track('fault_injected', { fault: next });
+      return { ...prev, [id]: next };
+    });
   }, []);
   const requestReport = useCallback((id: string) => {
     setReportReq((prev) => ({ id, n: (prev?.n ?? 0) + 1 }));
+  }, []);
+  const openReport = useCallback((id: string) => {
+    setInspecting(id);
+    track('report_opened');
   }, []);
   const onToggleAudio = useCallback((id: string) => {
     setAudible((prev) => ({ ...prev, [id]: !prev[id] }));
@@ -1167,6 +1250,7 @@ export default function App() {
     };
     setEscalations((prev) => [entry, ...prev].slice(0, 50));
     setReporting(null);
+    track('escalation_submitted', { severity, liveness: entry.evidence.liveness });
   }, [reporting]);
 
   const wallStreams: WallStreamRef[] = useMemo(
@@ -1210,13 +1294,23 @@ export default function App() {
           <h1>Liveview Watchdog</h1>
           <span className="bar__sub">frame-advancement monitoring</span>
         </div>
-        <div className="bar__clock">{clock}</div>
+        <div className="bar__right">
+          {/* Shared vs private is a fact about who else can change this wall,
+              so it is stated rather than inferred from behaviour. */}
+          <span className={`bar__sync bar__sync--${syncMode}`}
+            title={syncMode === 'firebase'
+              ? 'Shared wall — the feed list is live for every operator connected to this database'
+              : 'Private wall — the feed list is stored in this browser only'}>
+            {syncMode === 'firebase' ? 'shared' : 'local'}
+          </span>
+          <div className="bar__clock">{clock}</div>
+        </div>
       </header>
 
       <section className="strip">
         <div><span>feeds</span><strong>{tiles.length}</strong></div>
         <div><span>live</span><strong className="ok">{liveCount}</strong></div>
-        <div><span>signal lost</span><strong className={staleIds.length ? 'bad' : ''}>{staleIds.length}</strong></div>
+        <div><span>stale</span><strong className={staleIds.length ? 'bad' : ''}>{staleIds.length}</strong></div>
         <div><span>promoted</span><strong>{heroIds.length}</strong></div>
         {/* Suppression has to be visible. A feed quietly excluded from
             promotion is exactly the state an operator must not inherit blind. */}
@@ -1232,6 +1326,13 @@ export default function App() {
         <div><span>blocking</span><strong>{(perf.blockedMs / 1000).toFixed(1)}s</strong></div>
       </section>
 
+      {workerDown && (
+        <p className="banner" role="alert">
+          The watchdog worker stopped. Every status below is the last thing it said, not the
+          current truth — reload before trusting this wall.
+        </p>
+      )}
+
       <section className="controls">
         <div className="tabs" role="tablist" aria-label="Feed groups">
           {registry.groups.map((g) => {
@@ -1239,7 +1340,7 @@ export default function App() {
             return (
               <button key={g.id} role="tab" aria-selected={g.id === activeGroup}
                 className={g.id === activeGroup ? 'tab on' : 'tab'}
-                onClick={() => setActiveGroup(g.id)}>
+                onClick={() => { setActiveGroup(g.id); track('group_switched'); }}>
                 {g.name}<span className="tab__count">{count}</span>
               </button>
             );
@@ -1264,7 +1365,7 @@ export default function App() {
           listMode={listMode} elsById={elsById} faults={faults}
           onToggleFreeze={toggleFreeze} onAdd={() => setAdding(true)}
           incidentsByFeed={incidentsByFeed} escalationsByFeed={escalationsByFeed}
-          onOpenReport={setInspecting} />
+          onOpenReport={openReport} />
 
         {/* The Streams stay mounted and in the same place in the tree in both
             layouts. Their <video> elements ARE the decoders — reparenting one

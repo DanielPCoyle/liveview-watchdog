@@ -10,7 +10,7 @@
  * heartbeats. If those heartbeats stop — because the feed froze, OR because the
  * page is too busy to report — this timer keeps running and says so.
  */
-import type { ToWorker, FromWorker, Liveness } from './types';
+import type { ToWorker, FromWorker, Liveness, StaleReason } from './types';
 
 interface Sample { at: number; media: number }
 
@@ -84,6 +84,7 @@ setInterval(() => {
   for (const [id, en] of entries) {
     let liveness: Liveness;
     let staleMs = 0;
+    let reason: StaleReason | null = null;
 
     // Windowed media drift: how far the media clock moved per second of wall
     // clock, recently. ~1.0 healthy, ~0 for a feed that is not progressing.
@@ -101,17 +102,21 @@ setInterval(() => {
       staleMs = now - en.lastFrameAt;
       if (staleMs >= en.staleAfterMs) {
         liveness = 'stale';                       // frames stopped outright
+        reason = 'frames';
       } else if (drift != null && drift < DRIFT_STALE_BELOW) {
-        // Frames ARE arriving, but the content isn't moving — a player looping
-        // on a dead source. Treated as signal loss, because to the operator it
-        // is: what's on screen is not now.
+        // Frames ARE arriving, at full rate, and the content isn't moving — a
+        // player looping on a dead source, or a frozen picture behind a healthy
+        // element. Called stale because to the operator it is: what is on
+        // screen is not now. Reported separately from the case above, because
+        // "0.0s since the last frame, and dead" is the whole claim.
         liveness = 'stale';
+        reason = 'drift';
       } else {
         liveness = staleMs >= en.degradedAfterMs ? 'degraded' : 'live';
       }
     }
 
-    out.push([id, liveness, Math.round(staleMs), drift == null ? null : +drift.toFixed(3)]);
+    out.push([id, liveness, Math.round(staleMs), drift == null ? null : +drift.toFixed(3), reason]);
   }
 
   if (out.length) (self as unknown as Worker).postMessage({ type: 'status', entries: out } satisfies FromWorker);
