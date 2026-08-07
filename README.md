@@ -300,6 +300,30 @@ Three, all the same shape as the failure this project is about: something that r
 
 **Not built:** pixel-level frozen-frame detection (hash consecutive downsampled frames) for the advancing-clock case; culling off-screen tiles; throughput probing before a feed joins the wall.
 
+## Working on this with Claude Code
+
+The repository carries its own operating instructions, written from incidents
+rather than preferences:
+
+- **[`CLAUDE.md`](CLAUDE.md)** — the standing rules. Verify before committing;
+  claims require observations; every incident becomes a rule.
+- **[`.claude/rules/`](.claude/rules/README.md)** — six rules, each citing the
+  failure that produced it: a coverage gate that enforced nothing, tests that
+  passed on module evaluation order, analytics that queued events and
+  transmitted none, a deferred worker that silently stopped registering feeds,
+  performance scores that swung 20 points on machine load, and a mock that made
+  every feed look stale for a reason it invented itself.
+- **[`.claude/skills/`](.claude/skills)** — `/verify-live` (the verification
+  ladder, and what each layer does *not* prove), `/probe-feed` (validate a camera
+  including throughput, closing ADR-0007's blind spot), `/gate-check` (prove a
+  gate fails when it should), `/feed-rot` (catch camera decay).
+- **[`.claude/agents/`](.claude/agents)** — `evidence-verifier` (adversarially
+  refute a claim and report the observation that settles it), `feed-scout`,
+  `flake-triage`, `drift-checker`.
+
+The through-line is the same as the product's: a green light nobody has observed
+is not evidence.
+
 ## Decisions
 
 Nine records under [`docs/adr/`](docs/adr/README.md), including the two that were corrected by evidence.
