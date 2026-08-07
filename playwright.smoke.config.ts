@@ -9,7 +9,7 @@ import { defineConfig, devices } from '@playwright/test';
  */
 export default defineConfig({
   testDir: './e2e',
-  testMatch: 'smoke.spec.ts',
+  testMatch: /(smoke|mobile-prod)\.spec\.ts/,
   timeout: 150_000,
   expect: { timeout: 90_000 },
   fullyParallel: false,
@@ -20,5 +20,11 @@ export default defineConfig({
     baseURL: process.env.SMOKE_BASE_URL || 'https://liveview-watchdog-production.up.railway.app',
     trace: 'on-first-retry',
   },
-  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+  projects: [
+    { name: 'desktop', testMatch: /smoke\.spec\.ts/, use: { ...devices['Desktop Chrome'] } },
+    // The narrow layout drops the compositor entirely and draws each row from a
+    // near-invisible decoder, so it is worth exercising against the real
+    // deployment rather than only against mocks.
+    { name: 'mobile', testMatch: /mobile-prod\.spec\.ts/, use: { ...devices['Pixel 7'] } },
+  ],
 });

@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "bun test src",
     "test:e2e": "playwright test",
-    "test:smoke": "playwright test --config playwright.smoke.config.ts"
+    "test:smoke": "playwright test --config playwright.smoke.config.ts",
+    "test:smoke:mobile": "playwright test --config playwright.smoke.config.ts --project=mobile"
   },
   "dependencies": {
     "@sentry/react": "^10.69.0",
