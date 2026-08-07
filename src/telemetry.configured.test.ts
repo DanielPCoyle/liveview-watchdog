@@ -77,22 +77,32 @@ describe('Sentry, when a DSN is present', () => {
 });
 
 describe('GA4, when a measurement id is present', () => {
-  test('injects the tag script and forwards domain events', async () => {
+  test('injects the tag script and queues events in the shape gtag.js reads', async () => {
     env.VITE_GA_ID = 'G-TEST123';
     const t = await import('./telemetry');
-    const pending = t.initTelemetry();
-    // Resolve the script the way a successful network fetch would.
-    await new Promise((r) => setTimeout(r, 5));
+    await t.initTelemetry();
+
     const script = document.head.querySelector('script') as HTMLScriptElement | null;
     expect(script).not.toBeNull();
     expect(script!.src).toContain('G-TEST123');
-    script!.onload?.(new Event('load'));
-    await pending;
 
-    const pushed: unknown[][] = [];
-    (window as unknown as { dataLayer: unknown[] }).dataLayer = pushed;
+    const dl = (window as unknown as { dataLayer: IArguments[] }).dataLayer;
+    // Primed before the script arrives, so nothing tracked meanwhile is lost.
+    expect([...dl].some((a) => a[0] === 'js')).toBe(true);
+    expect([...dl].some((a) => a[0] === 'config' && a[1] === 'G-TEST123')).toBe(true);
+
     t.track('signal_lost', { cam: 'CAM-1' });
-    expect(pushed.some((a) => Array.isArray(a) && a[0] === 'event' && a[1] === 'signal_lost')).toBe(true);
+
+    /**
+     * Entries must be arguments objects, not arrays. An array queues, reads
+     * fine in a console, and is never transmitted — which is exactly how this
+     * shipped to production once already.
+     */
+    const last = dl[dl.length - 1];
+    expect(Array.isArray(last)).toBe(false);
+    expect(Object.prototype.toString.call(last)).toBe('[object Arguments]');
+    expect(last[0]).toBe('event');
+    expect(last[1]).toBe('signal_lost');
   });
 
   test('a blocked tag script is not an error, and track stays safe', async () => {

@@ -55,22 +55,38 @@ export async function initTelemetry() {
   const gaId = import.meta.env.VITE_GA_ID as string | undefined;
   if (gaId) {
     try {
-      await new Promise<void>((resolve, reject) => {
-        const s = document.createElement('script');
-        s.async = true;
-        s.src = `https://www.googletagmanager.com/gtag/js?id=${encodeURIComponent(gaId)}`;
-        s.onload = () => resolve();
-        s.onerror = () => reject(new Error('gtag blocked'));
-        document.head.appendChild(s);
-      });
       const w = window as unknown as { dataLayer: unknown[]; gtag: (...a: unknown[]) => void };
+
+      /**
+       * The canonical gtag bootstrap, in the canonical order, and both details
+       * matter.
+       *
+       * `dataLayer.push(arguments)` pushes the arguments OBJECT, not an array.
+       * gtag.js reads the queue expecting arguments-shaped entries; pushing a
+       * real array lands in the queue, reads correctly in a console, and is
+       * never transmitted. That failure is completely silent — the events were
+       * visibly queued and no request ever left the browser.
+       *
+       * The queue is also primed BEFORE the script loads, which is what makes
+       * it a queue: anything tracked while the tag is still downloading is
+       * replayed on arrival rather than dropped.
+       */
       w.dataLayer = w.dataLayer || [];
-      w.gtag = function gtag(...args: unknown[]) { w.dataLayer.push(args); };
+      // eslint-disable-next-line prefer-rest-params
+      w.gtag = function gtag() { w.dataLayer.push(arguments); };
       w.gtag('js', new Date());
       w.gtag('config', gaId);
       gaReady = true;
+
+      const s = document.createElement('script');
+      s.async = true;
+      s.src = `https://www.googletagmanager.com/gtag/js?id=${encodeURIComponent(gaId)}`;
+      // An ad blocker is the common case, not an exceptional one: the queue
+      // simply never drains, and nothing else in the app notices.
+      s.onerror = () => { gaReady = false; };
+      document.head.appendChild(s);
     } catch {
-      gaReady = false;  // ad blockers are the common case, not an error
+      gaReady = false;
     }
   }
 }
